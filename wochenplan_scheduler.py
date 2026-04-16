@@ -697,7 +697,8 @@ def _assign(ws: Worksheet, a1: str, text: str, style: Optional[str]=None):
 
 def write_medizin_placeholders_monday(ws: Worksheet):
     for a1 in MEDIZIN_MONDAY_CELLS.values():
-        _assign(ws, a1, "BITTE EINTRAGEN", "red_bold")
+        if a1 and isinstance(a1, str) and a1.strip():
+            _assign(ws, a1, "BITTE EINTRAGEN", "red_bold")
     
 def assign_meeting_by_pools(
     ws: Worksheet,
