@@ -112,8 +112,56 @@ def _init_session_state() -> None:
 _init_session_state()
 
 # ---------------------------------------------------------------------------
-# Page layout
+# Password gate
 # ---------------------------------------------------------------------------
+
+def _check_password() -> bool:
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.markdown(
+        """
+        <style>
+        .login-box {
+            max-width: 340px;
+            margin: 8rem auto 0 auto;
+            padding: 2rem 2rem 1.5rem 2rem;
+            border-radius: 8px;
+            background: #1a1a1a;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+        .login-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #e0e0e0;
+            margin-bottom: 1.5rem;
+            letter-spacing: 0.05em;
+        }
+        </style>
+        <div class="login-box">
+            <div class="login-title">🔒 Wochenplan Scheduler</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        pw = st.text_input("Passwort", type="password", label_visibility="collapsed",
+                           placeholder="Passwort eingeben")
+        if st.button("Anmelden", use_container_width=True, type="primary"):
+            if pw == st.secrets.get("password", ""):
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Falsches Passwort.")
+    return False
+
+if not _check_password():
+    st.stop()
+
+
 
 st.set_page_config(
     page_title="Wochenplan Scheduler",
