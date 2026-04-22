@@ -21,6 +21,7 @@ import wochenplan_scheduler as sched
 
 STAFF_JSON  = Path(__file__).parent / "staff.json"
 LAYOUT_JSON = Path(__file__).parent / "layout.json"
+MEETING_POOLS_JSON = Path(__file__).parent / "meeting_pools.json"
 OG_LIST_NO_LAUFEN = [og for og in sched.OG_LIST if og != "Laufen"]
 ALL_WEEKDAYS = sched.WEEKDAYS  # ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag"]
 
@@ -170,7 +171,7 @@ st.set_page_config(
 )
 st.title("Wochenplan Scheduler — KSBL Radiologie")
 
-tab_plan, tab_personal, tab_layout = st.tabs(["Wochenplan", "Personalverwaltung", "Layout-Editor"])
+tab_plan, tab_personal, tab_layout, tab_pools = st.tabs(["Wochenplan", "Personalverwaltung", "Layout-Editor", "Rapporte-Pools"])
 
 # ===========================================================================
 # TAB 1 — Wochenplan
@@ -313,8 +314,8 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
         c1, c2, c3 = st.columns(3)
         name     = c1.text_input("Name", value=d.get("name", ""), placeholder="J. Beispiel",
                                  disabled=(defaults is not None))
-        role     = c2.selectbox("Rolle", ["AA", "FA", "LA"],
-                                index=["AA", "FA", "LA"].index(d.get("role", "AA")))
+        role     = c2.selectbox("Rolle", ["AA", "OA", "LA"],
+                                index=["AA", "OA", "LA"].index(d.get("role", "AA")))
         site     = c3.selectbox("Standort", ["BH", "LI"],
                                 index=["BH", "LI"].index(d.get("site", "BH")))
 
@@ -610,3 +611,220 @@ with tab_layout:
         save_layout(new_layout)
         st.success("Layout gespeichert und neu geladen.")
         st.rerun()
+
+# ===========================================================================
+# TAB 4 — Rapporte-Pools
+# ===========================================================================
+
+def load_meeting_pools() -> dict:
+    with open(MEETING_POOLS_JSON, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_meeting_pools(data: dict) -> None:
+    with open(MEETING_POOLS_JSON, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    sched.load_meeting_pools_from_json(str(MEETING_POOLS_JSON))
+
+
+# Pool type options
+_POOL_TYPES = ["names", "group", "spaetdienst_aa"]
+_GROUP_OPTIONS = ["AA", "OA", "LA", "FA_ALL"]
+_SITE_OPTIONS = ["BH", "LI"]
+_STYLE_OPTIONS = ["", "red_bold"]
+
+
+def _exclude_if_day_to_str(eid: dict | None) -> str:
+    """Convert {"Donnerstag": ["H.W. Ott"]} → 'Donnerstag: H.W. Ott'"""
+    if not eid:
+        return ""
+    parts = []
+    for day, names in eid.items():
+        if isinstance(names, (list, tuple)):
+            parts.append(f"{day}: {', '.join(names)}")
+        else:
+            parts.append(f"{day}: {names}")
+    return "; ".join(parts)
+
+
+def _str_to_exclude_if_day(s: str) -> dict | None:
+    """Convert 'Donnerstag: H.W. Ott, X; Freitag: Y' → dict."""
+    if not s or not s.strip():
+        return None
+    result = {}
+    for part in s.split(";"):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        day, names_str = part.split(":", 1)
+        day = day.strip()
+        names = [n.strip() for n in names_str.split(",") if n.strip()]
+        if day and names:
+            result[day] = names
+    return result or None
+
+
+def _list_to_str(lst: list | None) -> str:
+    if not lst:
+        return ""
+    return ", ".join(str(x) for x in lst)
+
+
+def _str_to_list(s: str) -> list:
+    if not s or not s.strip():
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+with tab_pools:
+    st.subheader("Rapporte-Pools")
+    st.caption(
+        "Hier können die Prioritäts-Pools für jeden Rapport bearbeitet werden. "
+        "Die Pools werden in der definierten Reihenfolge durchlaufen, bis eine "
+        "verfügbare Person gefunden wird."
+    )
+
+    pools_data = load_meeting_pools()
+
+    for meeting_key, cfg in pools_data.items():
+        with st.expander(meeting_key):
+            prefix = meeting_key.replace("|", "_").replace(" ", "_").replace(":", "").replace("/", "_").replace("(", "").replace(")", "")
+
+            c1, c2 = st.columns(2)
+            cfg["fallback_text"] = c1.text_input(
+                "Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"),
+                key=f"{prefix}_fb_text",
+            )
+            cfg["fallback_style"] = c2.selectbox(
+                "Fallback-Stil", options=["red_bold", "black"],
+                index=["red_bold", "black"].index(cfg.get("fallback_style", "red_bold")),
+                key=f"{prefix}_fb_style",
+            )
+
+            c3, c4 = st.columns(2)
+            cfg["monday_style"] = c3.selectbox(
+                "Montag-Stil", options=["", "red"],
+                index=["", "red"].index(cfg.get("monday_style") or ""),
+                key=f"{prefix}_mon_style",
+            ) or None
+            cfg["tuesday_jc"] = c4.checkbox(
+                "Dienstag → JC", value=cfg.get("tuesday_jc", False),
+                key=f"{prefix}_tue_jc",
+            )
+
+            st.markdown("**Pools** (in Prioritätsreihenfolge)")
+            pools = cfg.get("pools", [])
+
+            pools_to_remove = []
+            for i, pool in enumerate(pools):
+                st.markdown(f"---\n**Pool {i+1}**")
+                pc1, pc2, pc3 = st.columns(3)
+
+                pool_type = pc1.selectbox(
+                    "Typ", options=_POOL_TYPES,
+                    index=_POOL_TYPES.index(pool.get("type", "names")),
+                    key=f"{prefix}_p{i}_type",
+                )
+                pool["type"] = pool_type
+
+                pool_site = pc2.selectbox(
+                    "Standort", options=_SITE_OPTIONS,
+                    index=_SITE_OPTIONS.index(pool.get("site", cfg.get("site", "BH"))),
+                    key=f"{prefix}_p{i}_site",
+                )
+                pool["site"] = pool_site
+
+                pool_style = pc3.selectbox(
+                    "Stil", options=_STYLE_OPTIONS,
+                    index=_STYLE_OPTIONS.index(pool.get("style", "")),
+                    key=f"{prefix}_p{i}_style",
+                )
+                pool["style"] = pool_style if pool_style else None
+
+                if pool_type == "names":
+                    names_str = st.text_input(
+                        "Namen (kommagetrennt)",
+                        value=_list_to_str(pool.get("names", [])),
+                        key=f"{prefix}_p{i}_names",
+                    )
+                    pool["names"] = _str_to_list(names_str)
+
+                if pool_type == "group":
+                    pool_group = st.selectbox(
+                        "Gruppe", options=_GROUP_OPTIONS,
+                        index=_GROUP_OPTIONS.index(pool.get("group", "AA")),
+                        key=f"{prefix}_p{i}_group",
+                    )
+                    pool["group"] = pool_group
+
+                pc4, pc5 = st.columns(2)
+                excl_laufen = pc4.checkbox(
+                    "Laufen ausschließen",
+                    value=pool.get("exclude_laufen", False),
+                    key=f"{prefix}_p{i}_excl_laufen",
+                )
+                pool["exclude_laufen"] = excl_laufen
+
+                excl_spaet = pc5.text_input(
+                    "Spätdienst ausschl. (Standort)",
+                    value=pool.get("exclude_spaetdienst", "") or "",
+                    key=f"{prefix}_p{i}_excl_spaet",
+                    help="BH oder LI eingeben, um Spätdienst-Personal auszuschließen.",
+                )
+                pool["exclude_spaetdienst"] = excl_spaet if excl_spaet.strip() else None
+
+                forbid_str = st.text_input(
+                    "Verboten (kommagetrennt)",
+                    value=_list_to_str(pool.get("forbid", [])),
+                    key=f"{prefix}_p{i}_forbid",
+                    help="Personen, die nie für diesen Pool in Frage kommen.",
+                )
+                pool["forbid"] = _str_to_list(forbid_str) or None
+
+                excl_names_str = st.text_input(
+                    "Ausgeschl. Namen (kommagetrennt)",
+                    value=_list_to_str(pool.get("exclude_names", [])),
+                    key=f"{prefix}_p{i}_excl_names",
+                )
+                pool["exclude_names"] = _str_to_list(excl_names_str) or None
+
+                eid_str = st.text_input(
+                    "Ausschluss pro Tag",
+                    value=_exclude_if_day_to_str(pool.get("exclude_if_day")),
+                    key=f"{prefix}_p{i}_eid",
+                    help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'",
+                )
+                pool["exclude_if_day"] = _str_to_exclude_if_day(eid_str)
+
+                if st.button(f"Pool {i+1} entfernen", key=f"{prefix}_p{i}_remove"):
+                    pools_to_remove.append(i)
+
+            for idx in sorted(pools_to_remove, reverse=True):
+                pools.pop(idx)
+
+            if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
+                pools.append({"type": "names", "names": [], "site": cfg.get("site", "BH")})
+                # Save immediately so the new pool appears
+                cfg["pools"] = pools
+                save_meeting_pools(pools_data)
+                st.rerun()
+
+            cfg["pools"] = pools
+
+    st.divider()
+    if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_btn"):
+        # Clean up None values before saving
+        for meeting_key, cfg in pools_data.items():
+            for pool in cfg.get("pools", []):
+                for k in list(pool.keys()):
+                    if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
+                        if k not in ("type", "names", "group", "site"):
+                            del pool[k]
+            if not cfg.get("monday_style"):
+                cfg.pop("monday_style", None)
+            if not cfg.get("tuesday_jc"):
+                cfg.pop("tuesday_jc", None)
+        save_meeting_pools(pools_data)
+        st.success("Rapporte-Pools gespeichert und neu geladen.")
+        st.rerun()
+

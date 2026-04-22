@@ -34,7 +34,7 @@ BH = "BH"
 LI = "LI"
 
 AA = "AA"   # Assistenzarzt
-FA = "FA"   # Facharzt (non-leader)
+OA = "OA"   # Oberarzt
 LA = "LA"   # Leitender Arzt
 
 # Laufen enabled weekdays (tweakable)
@@ -60,7 +60,7 @@ OG_LIST_NONLEADER = [og for og in OG_LIST if og != "Laufen"]
 @dataclass
 class Staff:
     name: str
-    role: str            # AA | FA | LA
+    role: str            # AA | OA | LA
     site: str            # BH | LI
     leads_ogs: Set[str] = field(default_factory=set)        # for LA only
     rotations: Set[str] = field(default_factory=set)        # AA + FA(non-leader)
@@ -77,7 +77,7 @@ class Staff:
 
     @property
     def is_fa(self) -> bool:
-        return self.role in {FA, LA}
+        return self.role in {OA, LA}
 
 staff_by_name: Dict[str, Staff] = {}
 
@@ -105,12 +105,12 @@ def add_staff(name: str, role: str, site: str,
 def rebuild_quick_views() -> None:
     """Rebuild the module-level quick-view lists from staff_by_name.
     Must be called after any mutation of staff_by_name."""
-    global aa_bh, aa_li, fa_nonleaders_bh, fa_nonleaders_li
+    global aa_bh, aa_li, oa_bh, oa_li
     global fa_all_bh, fa_all_li, la_bh, la_li, leaders_by_og
     aa_bh            = [s.name for s in staff_by_name.values() if s.role == AA and s.site == BH]
     aa_li            = [s.name for s in staff_by_name.values() if s.role == AA and s.site == LI]
-    fa_nonleaders_bh = [s.name for s in staff_by_name.values() if s.role == FA and s.site == BH]
-    fa_nonleaders_li = [s.name for s in staff_by_name.values() if s.role == FA and s.site == LI]
+    oa_bh            = [s.name for s in staff_by_name.values() if s.role == OA and s.site == BH]
+    oa_li            = [s.name for s in staff_by_name.values() if s.role == OA and s.site == LI]
     fa_all_bh        = [s.name for s in staff_by_name.values() if s.is_fa and s.site == BH]
     fa_all_li        = [s.name for s in staff_by_name.values() if s.is_fa and s.site == LI]
     la_bh            = [s.name for s in staff_by_name.values() if s.role == LA and s.site == BH]
@@ -144,7 +144,7 @@ def load_staff_from_json(path: str) -> None:
 
 
 # Quick-view placeholders — populated by load_staff_from_json below
-aa_bh = aa_li = fa_nonleaders_bh = fa_nonleaders_li = []
+aa_bh = aa_li = oa_bh = oa_li = []
 fa_all_bh = fa_all_li = la_bh = la_li = []
 leaders_by_og: Dict[str, List[str]] = {}
 
@@ -211,6 +211,25 @@ if not os.path.exists(_layout_json):
         "Create it before running the scheduler."
     )
 load_layout_from_json(_layout_json)
+
+
+# meeting_pools.json holds the priority-pool definitions for every Rapport.
+MEETING_POOLS: Dict[str, dict] = {}
+
+def load_meeting_pools_from_json(path: str) -> None:
+    """Load meeting pool definitions from JSON, replacing current MEETING_POOLS."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    MEETING_POOLS.clear()
+    MEETING_POOLS.update(data)
+
+_pools_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meeting_pools.json")
+if not os.path.exists(_pools_json):
+    raise FileNotFoundError(
+        f"meeting_pools.json not found at {_pools_json}. "
+        "Create it before running the scheduler."
+    )
+load_meeting_pools_from_json(_pools_json)
 
 
 def _clear_cells(ws: Worksheet, cells: Tuple[str, ...]):
@@ -562,7 +581,7 @@ def _place_in_og(ws: Worksheet, day: str, og: str, name: str, count_for_fa: bool
     if s and s.role!=LA:
         s.og_nonleader_count += 1
         if s.role==AA: s.aa_og_count += 1
-    if count_for_fa and s and s.role==FA:
+    if count_for_fa and s and s.role==OA:
         FA_COUNTS[day][og] += 1
     return True
 
@@ -571,8 +590,8 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
     for day in WEEKDAYS:
         abs_today = absences_by_day.get(day,set())
 
-        # 1) non-leader FAs with rotations (skip Laufen)
-        for name in [n for n in (fa_nonleaders_bh+fa_nonleaders_li) if n not in abs_today]:
+        # 1) non-leader OAs with rotations (skip Laufen)
+        for name in [n for n in (oa_bh+oa_li) if n not in abs_today]:
             s=staff_by_name[name]
             for og in s.rotations:
                 if og in OG_LIST_NONLEADER: _place_in_og(ws,day,og,name,True)
@@ -597,7 +616,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                 if og != "Mammo"
                 and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
                     ]
-        for name in [n for n in (fa_nonleaders_bh+fa_nonleaders_li) if n not in abs_today and not staff_by_name[n].rotations]:
+        for name in [n for n in (oa_bh+oa_li) if n not in abs_today and not staff_by_name[n].rotations]:
             opts = free_ogs(day); 
             if not opts: continue
             minv = min(FA_COUNTS[day][og] for og in opts); bucket=[og for og in opts if FA_COUNTS[day][og]==minv]
@@ -638,8 +657,8 @@ POOL_COUNTS = defaultdict(int)  # key: (meeting_key, pool_index, name) -> count
 def _group_names(group: str, site: str) -> List[str]:
     if group == "AA":
         return aa_bh if site == BH else aa_li
-    if group == "FA_NONLEADER":
-        return fa_nonleaders_bh if site == BH else fa_nonleaders_li
+    if group == "OA":
+        return oa_bh if site == BH else oa_li
     if group == "LA":
         return [n for n in staff_by_name if staff_by_name[n].role == LA and staff_by_name[n].site == site]
     if group == "FA_ALL":
@@ -766,243 +785,39 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], seed: Optional
     laufen_by_day = read_laufen_by_day(ws)
     spaet         = read_spaetdienst_by_day(ws)
 
-    # -------------------- BH --------------------
+    # Iterate over all meetings defined in meeting_pools.json
+    for meeting_key, cfg in MEETING_POOLS.items():
+        site = cfg["site"]
+        # Derive the meeting name from the key (format: "SITE|Meeting Name")
+        mtg_name = meeting_key.split("|", 1)[1]
 
-    # BH | Medizin (07:45-08:00) — fair BH FAs; exclude Laufen; exclude H.W. Ott Thu; Monday red
-    for day, cells in MEETING_CELLS["BH"]["Medizin (07:45-08:00)"].items():
-        pools = [
-            {"type": "group", "group": "FA_ALL", "site": BH, "exclude_laufen": True,
-             "exclude_if_day": {"Donnerstag": {"H.W. Ott"}}, "forbid": {"R. Hügli"}}, 
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="BH|Medizin (07:45-08:00)", site=BH, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            monday_style="red", fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # BH | Reha (11:40-12:00)
-    for day, cells in MEETING_CELLS["BH"]["Reha (11:40-12:00)"].items():
-        pools = [
-            {"type": "group", "group": "AA",           "site": BH, "exclude_spaetdienst": "BH", "exclude_laufen": True},
-            {"type": "group", "group": "FA_NONLEADER", "site": BH, "style": "red_bold",        "exclude_laufen": True},
-            {"type": "names", "names": ["H.W. Ott"],                "style": "red_bold"},
-            {"type": "group", "group": "LA",           "site": BH, "style": "red_bold",        "exclude_laufen": True, "forbid": {"R. Hügli"}},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="BH|Reha (11:40-12:00)", site=BH, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # BH | Chirurgie (13:00-13:30)
-    for day, cells in MEETING_CELLS["BH"]["Chirurgie (13:00-13:30)"].items():
-        pools = [
-            {"type": "spaetdienst_aa", "site": BH},  # auto-assign if available
-            {"type": "group", "group": "AA",           "site": BH, "exclude_laufen": True},
-            {"type": "group", "group": "FA_NONLEADER", "site": BH, "style": "red_bold", "exclude_laufen": True},
-            {"type": "names", "names": ["S. Vitéz"],   "style": "red_bold"},
-            {"type": "group", "group": "LA",           "site": BH, "style": "red_bold", "exclude_laufen": True, "forbid": {"R. Hügli"}},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="BH|Chirurgie (13:00-13:30)", site=BH, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # BH | Arlesheim (12:00-12:30)
-    for day, cells in MEETING_CELLS["BH"]["Arlesheim (12:00-12:30)"].items():
-        pools = [
-            {"type": "group", "group": "AA",           "site": BH, "exclude_laufen": True},
-            {"type": "group", "group": "FA_NONLEADER", "site": BH, "exclude_laufen": True},
-            {"type": "names", "names": ["S. Vitéz"],   "style": "red_bold"},
-            {"type": "group", "group": "LA",           "site": BH, "style": "red_bold", "exclude_laufen": True, "forbid": {"R. Hügli"}},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="BH|Arlesheim (12:00-12:30)", site=BH, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # BH | Memory Clinic (13:50) — only H.W. Ott; else FÄLLT AUS (black)
-    for day, cells in MEETING_CELLS["BH"]["Memory Clinic (13:50)"].items():
-        pools = [{"type": "names", "names": ["H.W. Ott"]}]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="BH|Memory Clinic (13:50)", site=BH, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="black",
-        )
-
-    # BH | Vask Konferenz (16:30)
-    for day, cells in MEETING_CELLS["BH"]["Vask Konferenz (16:30)"].items():
-        pools = [
-            {"type": "names", "names": ["R. Hügli"]},
-            {"type": "names", "names": ["U. Quäschling"], "style": "red_bold"},
-            {"type": "names", "names": ["P. Kettnaker"],  "style": "red_bold"},
-            {"type": "names", "names": ["D. Bilecen"],    "style": "red_bold"},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="BH|Vask Konferenz (16:30)", site=BH, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # BH | Fallvorstellung / JC — Tue "JC" red; other days AAs; else "-" black
-    for day, cells in MEETING_CELLS["BH"]["Fallvorstellung / JC"].items():
-        if day == "Dienstag":
-            for a1 in cells: _assign(ws, a1, "JC", "red_bold")
+        # Look up the cell map in MEETING_CELLS
+        mtg_cells = MEETING_CELLS.get(site, {}).get(mtg_name, {})
+        if not mtg_cells:
             continue
-        pools = [{"type": "group", "group": "AA", "site": BH, "exclude_laufen": True}]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="BH|Fallvorstellung / JC", site=BH, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="-", fallback_style="black",
-        )
 
-    # -------------------- LI --------------------
+        pools         = cfg.get("pools", [])
+        monday_style  = cfg.get("monday_style")
+        fallback_text = cfg.get("fallback_text", "FÄLLT AUS")
+        fallback_style = cfg.get("fallback_style", "red_bold")
+        tuesday_jc    = cfg.get("tuesday_jc", False)
 
-    # LI | Medizin (08:00-8:30) — fair Dashti/Bilecen; then Brandenberger/Sexauer; then any LI FA (!= Rasmus); Monday red
-    for day, cells in MEETING_CELLS["LI"]["Medizin (08:00-8:30)"].items():
-        pool0_names = ["D. Bilecen"] if day == "Donnerstag" else ["D. Dashti", "D. Bilecen"]
-        pools = [
-            {"type": "names", "names": pool0_names},
-            {"type": "names", "names": ["D. Brandenberger","R. Sexauer"]},
-            {"type": "group", "group": "FA_ALL", "site": LI,
-             "exclude_if_day": {"Donnerstag": {"D. Dashti"}}, "forbid": {"M. Rasmus"}},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Medizin (08:00-8:30)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            monday_style="red",
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
+        for day, cells in mtg_cells.items():
+            if not cells:
+                continue
 
-    # LI | Urologie (07:45-08:00)
-    for day, cells in MEETING_CELLS["LI"]["Urologie (07:45-08:00)"].items():
-        pools = [
-            {"type": "group", "group": "AA",           "site": LI, "exclude_spaetdienst": "LI"},
-            {"type": "group", "group": "FA_NONLEADER", "site": LI, "style": "red_bold"},
-            {"type": "names", "names": ["M. Rasmus"],                "style": "red_bold"},
-            {"type": "group", "group": "LA",           "site": LI, "style": "red_bold"},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Urologie (07:45-08:00)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
+            # Special case: Fallvorstellung/JC on Tuesday → write "JC" directly
+            if tuesday_jc and day == "Dienstag":
+                for a1 in cells:
+                    _assign(ws, a1, "JC", "red_bold")
+                continue
 
-    # LI | Chirurgie (15:00-15:30) — fair Dellios/Kettnaker; then Bilecen red; then any LI LA red
-    for day, cells in MEETING_CELLS["LI"]["Chirurgie (15:00-15:30)"].items():
-        pools = [
-            {"type": "names", "names": ["N. Dellios","P. Kettnaker"]},
-            {"type": "names", "names": ["D. Bilecen"], "style": "red_bold"},
-            {"type": "group", "group": "LA", "site": LI, "style": "red_bold", "exclude_names": {"D. Bilecen"}},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Chirurgie (15:00-15:30)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # LI | Gefässe (15:30-16:00)
-    for day, cells in MEETING_CELLS["LI"]["Gefässe (15:30-16:00)"].items():
-        pools = [
-            {"type": "names", "names": ["U. Quäschling"]},
-            {"type": "names", "names": ["P. Kettnaker"], "style": "red_bold"},
-            {"type": "names", "names": ["D. Bilecen"],   "style": "red_bold"},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Gefässe (15:30-16:00)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # LI | Mammo-TK (08:00-08:30) — only R. Sexauer; else FÄLLT AUS (black)
-    for day, cells in MEETING_CELLS["LI"]["Mammo-TK (08:00-08:30)"].items():
-        pools = [{"type": "names", "names": ["R. Sexauer"]}]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Mammo-TK (08:00-08:30)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="black",
-        )
-
-    # LI | Endokrino. (17:00-17:45) — only J. Reichmann; else FÄLLT AUS (black)
-    for day, cells in MEETING_CELLS["LI"]["Endokrino. (17:00-17:45)"].items():
-        pools = [{"type": "names", "names": ["J. Reichmann"]}]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Endokrino. (17:00-17:45)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="black",
-        )
-
-    # LI | HNO (13:30-14:30) — Spätdienst LI AA; AA LI red; Dashti red; FA(non-leader) LI red
-    for day, cells in MEETING_CELLS["LI"]["HNO (13:30-14:30)"].items():
-        pools = [
-            {"type": "spaetdienst_aa", "site": LI},
-            {"type": "group", "group": "AA",           "site": LI, "style": "red_bold"},
-            {"type": "names", "names": ["D. Dashti"],               "style": "red_bold"},
-            {"type": "group", "group": "FA_NONLEADER", "site": LI, "style": "red_bold"},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|HNO (13:30-14:30)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FÄLLT AUS", fallback_style="red_bold",
-        )
-
-    # LI | Tumorkonf 1 (16:45-19:00) — Sexauer; Reichmann; (red) Rasch; else FEHLT (red)
-    for day, cells in MEETING_CELLS["LI"]["Tumorkonf 1 (16:45-19:00)"].items():
-        pools = [
-            {"type": "names", "names": ["R. Sexauer", "J. Reichmann", "L. Husmann" ]},
-            {"type": "names", "names": ["H. Rasch"], "style": "red_bold"},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Tumorkonf 1 (16:45-19:00)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FEHLT", fallback_style="red_bold",
-        )
-
-    # LI | Tumorkonf 2 (16:45-19:00) — Rasmus; Reichmann; Sexauer; (red) Vitéz; else FEHLT (red)
-    for day, cells in MEETING_CELLS["LI"]["Tumorkonf 2 (16:45-19:00)"].items():
-        pools = [
-            {"type": "names", "names": ["M. Rasmus", "R. Sexauer"]},
-            {"type": "names", "names": ["J. Reichmann", "L. Husmann"]},
-            {"type": "names", "names": ["S. Vitéz"], "style": "red_bold"},
-        ]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Tumorkonf 2 (16:45-19:00)", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="FEHLT", fallback_style="red_bold",
-        )
-
-    # LI | Fallvorstellung/JC — Tue "JC"; others AA LI; else "-" black
-    for day, cells in MEETING_CELLS["LI"]["Fallvorstellung/JC"].items():
-        if day == "Dienstag":
-            for a1 in cells: _assign(ws, a1, "JC", "red_bold")
-            continue
-        pools = [{"type": "group", "group": "AA", "site": LI}]
-        assign_meeting_by_pools(
-            ws, rng=rng, meeting_key="LI|Fallvorstellung/JC", site=LI, day=day, cells=cells, pools=pools,
-            absences=absences, spaetdienst=spaet, laufen_names=laufen_by_day.get(day,set()),
-            fallback_text="-", fallback_style="black",
-        )
-
-    # LI | Myo-Szinti (16:30-17:00) — J. Reichmann; if absent → L. Husmann; else FÄLLT AUS (red)
-    for day, cells in MEETING_CELLS["LI"]["Myo-Szinti (16:30-17:00)"].items():
-            pools = [
-                {"type": "names", "names": ["J. Reichmann"]},
-                {"type": "names", "names": ["L. Husmann"]},
-            ]
             assign_meeting_by_pools(
-                ws, rng=rng,
-                meeting_key="LI|Myo-Szinti (16:30-17:00)",
-                site=LI,
-                day=day,
-                cells=cells,
-                pools=pools,
-                absences=absences,
-                spaetdienst=spaet,
+                ws, rng=rng, meeting_key=meeting_key, site=site, day=day, cells=cells,
+                pools=pools, absences=absences, spaetdienst=spaet,
                 laufen_names=laufen_by_day.get(day, set()),
-                fallback_text="FÄLLT AUS",
-                fallback_style="red_bold",
+                monday_style=monday_style,
+                fallback_text=fallback_text, fallback_style=fallback_style,
             )
 
 

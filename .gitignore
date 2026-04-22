@@ -6,6 +6,7 @@
 # Data files
 staff.json
 layout.json
+meeting_pools.json
 
 # Python
 __pycache__/
