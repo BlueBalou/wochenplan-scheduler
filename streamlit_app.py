@@ -79,7 +79,11 @@ def save_staff_to_json() -> None:
 def staff_to_display_dataframe() -> pd.DataFrame:
     """Read-only overview table shown above the edit form."""
     rows = []
-    for s in sorted(sched.staff_by_name.values(), key=lambda x: (x.role, x.name)):
+    # Sort by surname (last part of name after last space)
+    def get_surname(s):
+        return s.name.split()[-1]
+    
+    for s in sorted(sched.staff_by_name.values(), key=get_surname):
         fr_info = "Immer" if s.fr_excluded else (
             ", ".join(d[:2] for d in sched.WEEKDAYS if d in s.fr_excluded_days) or "—"
         )
@@ -399,17 +403,18 @@ with tab_personal:
     # Read-only overview table with color-coded roles
     df = staff_to_display_dataframe()
     
-    # Define role colors
-    def color_role(val):
+    # Define role colors (softer, 30% opacity)
+    def color_row(row):
         colors = {
-            "AA": "background-color: #90EE90",  # light green
-            "OA": "background-color: #87CEEB",  # sky blue
-            "LA": "background-color: #FFB6C6",  # light red/pink
+            "AA": "background-color: rgba(144, 238, 144, 0.3)",  # light green
+            "OA": "background-color: rgba(135, 206, 235, 0.3)",  # sky blue
+            "LA": "background-color: rgba(255, 182, 198, 0.3)",  # light pink
         }
-        return colors.get(val, "")
+        color = colors.get(row["Rolle"], "")
+        return [color] * len(row)
     
-    # Apply styling
-    styled_df = df.style.map(color_role, subset=["Rolle"])
+    # Apply styling to entire rows
+    styled_df = df.style.apply(color_row, axis=1)
     
     st.dataframe(
         styled_df,
@@ -873,17 +878,17 @@ with tab_pools:
                 )
                 pool["exclude_if_day"] = _str_to_exclude_if_day(eid_str)
 
-                # Pool removal button - disabled for first pool
-                if st.button(
-                    f"Pool {i+1} entfernen", 
-                    key=f"{prefix}_p{i}_remove",
-                    disabled=(i == 0),
-                    help="Der erste Pool kann nicht entfernt werden." if i == 0 else None,
-                ):
-                    pools.pop(i)
-                    cfg["pools"] = pools
-                    save_meeting_pools(pools_data)
-                    st.rerun()
+                # Pool removal button - only shown on last pool if there's more than 1
+                if i == len(pools) - 1 and len(pools) > 1:
+                    if st.button(
+                        "Pool entfernen", 
+                        key=f"{prefix}_p{i}_remove",
+                        help="Entfernt den letzten Pool.",
+                    ):
+                        pools.pop(i)
+                        cfg["pools"] = pools
+                        save_meeting_pools(pools_data)
+                        st.rerun()
 
             if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
                 pools.append({"type": "names", "names": [], "site": cfg.get("site", "BH")})
@@ -908,14 +913,28 @@ with tab_pools:
 
     st.divider()
     if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_btn"):
-        # Clean up None/empty values before saving
+        # Validate pools before saving
+        validation_errors = []
         for meeting_key, cfg in pools_data.items():
-            for pool in cfg.get("pools", []):
-                for k in list(pool.keys()):
-                    if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
-                        if k not in ("type", "names", "group", "site"):
-                            del pool[k]
-        save_meeting_pools(pools_data)
-        st.success("Rapporte-Pools gespeichert und neu geladen.")
-        st.rerun()
+            for i, pool in enumerate(cfg.get("pools", []), start=1):
+                if pool.get("type") == "names" and not pool.get("names"):
+                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Person' hat keine Namen ausgewählt. Bitte Namen auswählen oder Typ ändern.")
+                if pool.get("type") == "group" and not pool.get("group"):
+                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Gruppe' hat keine Gruppe ausgewählt.")
+        
+        if validation_errors:
+            st.error("**Validierungsfehler - Speichern nicht möglich:**")
+            for err in validation_errors:
+                st.error(f"• {err}")
+        else:
+            # Clean up None/empty values before saving
+            for meeting_key, cfg in pools_data.items():
+                for pool in cfg.get("pools", []):
+                    for k in list(pool.keys()):
+                        if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
+                            if k not in ("type", "names", "group", "site"):
+                                del pool[k]
+            save_meeting_pools(pools_data)
+            st.success("Rapporte-Pools gespeichert und neu geladen.")
+            st.rerun()
 
