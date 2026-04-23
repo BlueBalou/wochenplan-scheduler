@@ -149,9 +149,12 @@ def _check_password() -> bool:
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        pw = st.text_input("Passwort", type="password", label_visibility="collapsed",
-                           placeholder="Passwort eingeben")
-        if st.button("Anmelden", use_container_width=True, type="primary"):
+        with st.form("login_form"):
+            pw = st.text_input("Passwort", type="password", label_visibility="collapsed",
+                               placeholder="Passwort eingeben")
+            submitted = st.form_submit_button("Anmelden", use_container_width=True, type="primary")
+            
+        if submitted:
             if pw == st.secrets.get("password", ""):
                 st.session_state["authenticated"] = True
                 st.rerun()
@@ -170,6 +173,16 @@ st.set_page_config(
     layout="wide",
 )
 st.title("Wochenplan Scheduler — KSBL Radiologie")
+
+# Helper functions for meeting pools (used in multiple tabs)
+def load_meeting_pools() -> dict:
+    with open(MEETING_POOLS_JSON, encoding="utf-8") as f:
+        return json.load(f)
+
+def save_meeting_pools(data: dict) -> None:
+    with open(MEETING_POOLS_JSON, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    sched.load_meeting_pools_from_json(str(MEETING_POOLS_JSON))
 
 tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan", "Personalverwaltung", "Rapporte-Pools", "Layout-Editor"])
 
@@ -329,17 +342,19 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
 
         st.markdown("**Kein Frontarzt**")
         fr_col1, fr_col2 = st.columns([1, 2])
+        # Only disable for AA when editing (defaults is not None)
+        disable_for_aa = (role == "AA" and defaults is not None)
         fr_always = fr_col1.checkbox(
             "Nie Frontarzt",
             value=d.get("fr_excluded", False),
-            disabled=(role == "AA"),
-            help="Nur relevant für Fachärzte (OA/LA)." if role == "AA" else None,
+            disabled=disable_for_aa,
+            help="Nur relevant für Fachärzte (OA/LA)." if disable_for_aa else None,
         )
         fr_days = fr_col2.multiselect(
             "Nur an diesen Tagen kein Frontarzt",
             options=sched.WEEKDAYS,
             default=sorted(d.get("fr_excluded_days", [])),
-            disabled=(fr_always or role == "AA"),
+            disabled=(fr_always or disable_for_aa),
             help="Wird ignoriert wenn 'Nie Frontarzt' aktiviert ist oder Person kein Facharzt ist.",
         )
 
@@ -381,9 +396,23 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
 with tab_personal:
     st.subheader("Personalbestand")
 
-    # Read-only overview table
+    # Read-only overview table with color-coded roles
+    df = staff_to_display_dataframe()
+    
+    # Define role colors
+    def color_role(val):
+        colors = {
+            "AA": "background-color: #90EE90",  # light green
+            "OA": "background-color: #87CEEB",  # sky blue
+            "LA": "background-color: #FFB6C6",  # light red/pink
+        }
+        return colors.get(val, "")
+    
+    # Apply styling
+    styled_df = df.style.map(color_role, subset=["Rolle"])
+    
     st.dataframe(
-        staff_to_display_dataframe(),
+        styled_df,
         use_container_width=True,
         hide_index=True,
     )
@@ -654,17 +683,6 @@ with tab_layout:
 # TAB 4 — Rapporte-Pools
 # ===========================================================================
 
-def load_meeting_pools() -> dict:
-    with open(MEETING_POOLS_JSON, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_meeting_pools(data: dict) -> None:
-    with open(MEETING_POOLS_JSON, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    sched.load_meeting_pools_from_json(str(MEETING_POOLS_JSON))
-
-
 # Pool type options with display labels
 _POOL_TYPES_MAP = {
     "names": "Person",
@@ -795,12 +813,15 @@ with tab_pools:
 
                 # Type-specific fields
                 if pool_type == "names":
-                    names_str = st.text_input(
-                        "Namen (kommagetrennt)",
-                        value=_list_to_str(pool.get("names", [])),
+                    current_names = pool.get("names") or []
+                    selected_names = st.multiselect(
+                        "Namen",
+                        options=all_staff_names,
+                        default=[n for n in current_names if n in all_staff_names],
                         key=f"{prefix}_p{i}_names",
+                        help="Wählen Sie Personen für diesen Pool aus.",
                     )
-                    pool["names"] = _str_to_list(names_str)
+                    pool["names"] = selected_names if selected_names else []
 
                 if pool_type == "group":
                     current_group = pool.get("group", "AA")
@@ -833,7 +854,7 @@ with tab_pools:
                 pool["exclude_spaetdienst"] = pool_site if excl_spaet else None
 
                 # Ausgeschlossene Personen - multiselect dropdown
-                current_excluded = pool.get("exclude_names", [])
+                current_excluded = pool.get("exclude_names") or []
                 excluded_names = st.multiselect(
                     "Ausgeschlossene Personen",
                     options=all_staff_names,
@@ -852,8 +873,13 @@ with tab_pools:
                 )
                 pool["exclude_if_day"] = _str_to_exclude_if_day(eid_str)
 
-                # Pool removal button - fixed to work immediately
-                if st.button(f"Pool {i+1} entfernen", key=f"{prefix}_p{i}_remove"):
+                # Pool removal button - disabled for first pool
+                if st.button(
+                    f"Pool {i+1} entfernen", 
+                    key=f"{prefix}_p{i}_remove",
+                    disabled=(i == 0),
+                    help="Der erste Pool kann nicht entfernt werden." if i == 0 else None,
+                ):
                     pools.pop(i)
                     cfg["pools"] = pools
                     save_meeting_pools(pools_data)
