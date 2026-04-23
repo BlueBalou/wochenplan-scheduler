@@ -171,7 +171,7 @@ st.set_page_config(
 )
 st.title("Wochenplan Scheduler — KSBL Radiologie")
 
-tab_plan, tab_personal, tab_layout, tab_pools = st.tabs(["Wochenplan", "Personalverwaltung", "Layout-Editor", "Rapporte-Pools"])
+tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan", "Personalverwaltung", "Rapporte-Pools", "Layout-Editor"])
 
 # ===========================================================================
 # TAB 1 — Wochenplan
@@ -695,21 +695,9 @@ with tab_pools:
                 "Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"),
                 key=f"{prefix}_fb_text",
             )
-            cfg["fallback_style"] = c2.selectbox(
-                "Fallback-Stil", options=["red_bold", "black"],
-                index=["red_bold", "black"].index(cfg.get("fallback_style", "red_bold")),
-                key=f"{prefix}_fb_style",
-            )
-
-            c3, c4 = st.columns(2)
-            cfg["monday_style"] = c3.selectbox(
-                "Montag-Stil", options=["", "red"],
-                index=["", "red"].index(cfg.get("monday_style") or ""),
-                key=f"{prefix}_mon_style",
-            ) or None
-            cfg["tuesday_jc"] = c4.checkbox(
-                "Dienstag → JC", value=cfg.get("tuesday_jc", False),
-                key=f"{prefix}_tue_jc",
+            cfg["roter_fallback_text"] = c2.checkbox(
+                "Roter Text", value=cfg.get("roter_fallback_text", True),
+                key=f"{prefix}_fb_rot",
             )
 
             st.markdown("**Pools** (in Prioritätsreihenfolge)")
@@ -813,17 +801,13 @@ with tab_pools:
 
     st.divider()
     if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_btn"):
-        # Clean up None values before saving
+        # Clean up None/empty values before saving
         for meeting_key, cfg in pools_data.items():
             for pool in cfg.get("pools", []):
                 for k in list(pool.keys()):
                     if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
                         if k not in ("type", "names", "group", "site"):
                             del pool[k]
-            if not cfg.get("monday_style"):
-                cfg.pop("monday_style", None)
-            if not cfg.get("tuesday_jc"):
-                cfg.pop("tuesday_jc", None)
         save_meeting_pools(pools_data)
         st.success("Rapporte-Pools gespeichert und neu geladen.")
         st.rerun()

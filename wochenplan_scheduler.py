@@ -796,27 +796,20 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], seed: Optional
         if not mtg_cells:
             continue
 
-        pools         = cfg.get("pools", [])
-        monday_style  = cfg.get("monday_style")
-        fallback_text = cfg.get("fallback_text", "FÄLLT AUS")
-        fallback_style = cfg.get("fallback_style", "red_bold")
-        tuesday_jc    = cfg.get("tuesday_jc", False)
+        pools              = cfg.get("pools", [])
+        fallback_text      = cfg.get("fallback_text", "FÄLLT AUS")
+        roter_fallback     = cfg.get("roter_fallback_text", True)
+        fallback_style     = "red_bold" if roter_fallback else "black"
 
         for day, cells in mtg_cells.items():
             if not cells:
-                continue
-
-            # Special case: Fallvorstellung/JC on Tuesday → write "JC" directly
-            if tuesday_jc and day == "Dienstag":
-                for a1 in cells:
-                    _assign(ws, a1, "JC", "red_bold")
                 continue
 
             assign_meeting_by_pools(
                 ws, rng=rng, meeting_key=meeting_key, site=site, day=day, cells=cells,
                 pools=pools, absences=absences, spaetdienst=spaet,
                 laufen_names=laufen_by_day.get(day, set()),
-                monday_style=monday_style,
+                monday_style=None,
                 fallback_text=fallback_text, fallback_style=fallback_style,
             )
 
