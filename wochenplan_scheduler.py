@@ -672,8 +672,7 @@ def _filter_candidates(base: List[str], *, day: str, site: str,
                        exclude_names: Optional[Set[str]] = None,
                        exclude_if_day: Optional[Dict[str, Set[str]]] = None,
                        exclude_laufen: bool = False,
-                       laufen_names: Optional[Set[str]] = None,
-                       forbid: Optional[Set[str]] = None) -> List[str]:
+                       laufen_names: Optional[Set[str]] = None) -> List[str]:
     c = [n for n in base if n not in absences.get(day, set())]
     if exclude_spaetdienst:
         c = [n for n in c if n not in spaetdienst_by_site_day.get(exclude_spaetdienst, {}).get(day, set())]
@@ -683,8 +682,6 @@ def _filter_candidates(base: List[str], *, day: str, site: str,
         c = [n for n in c if n not in exclude_if_day[day]]
     if exclude_laufen and laufen_names:
         c = [n for n in c if n not in laufen_names]
-    if forbid:
-        c = [n for n in c if n not in forbid]
     return c
 
 def _fair_pick_pool(meeting_key: str, pool_idx: int, candidates: List[str], rng: random.Random) -> Optional[str]:
@@ -761,7 +758,6 @@ def assign_meeting_by_pools(
                 exclude_if_day={k:set(v) for k,v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
                 exclude_laufen=pool.get("exclude_laufen", False),
                 laufen_names=laufen_names,
-                forbid=set(pool.get("forbid", [])) or None,
             )
 
             pick = _fair_pick_pool(meeting_key, idx, cands, rng)
