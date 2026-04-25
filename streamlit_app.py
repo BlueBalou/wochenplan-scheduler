@@ -178,7 +178,7 @@ st.set_page_config(
     layout="wide",
 )
 st.title("Wochenplan Scheduler — KSBL Radiologie")
-st.caption("by S. Vitéz · Powered by Claude AI")
+st.caption("by S. Vitéz · Powered by Anthropic")
 
 # Helper functions for meeting pools (used in multiple tabs)
 def load_meeting_pools() -> dict:
@@ -286,7 +286,7 @@ with tab_plan:
     if not template_exists:
         st.warning("⚠️ Keine 'KW_xx_TEMPLATE.xlsm' gefunden. Bitte lade eine Vorlage hoch (unten).")
     
-    st.markdown("### CSV 🪄→✨ Standard-Vorlage 🪄→✨ fertiger Wochenplan")
+    st.markdown("### 📤 CSV + Standard-Vorlage 🪄→ fertiger Wochenplan")
     
     csv_file_opt1 = st.file_uploader(
         "CSV-Datei hochladen",
@@ -305,7 +305,7 @@ with tab_plan:
         )
     
     run_opt1 = st.button(
-        "Pipeline starten (mit Standard-Vorlage)",
+        "Wochenplan erstellen (mit Standard-Vorlage)",
         disabled=(csv_file_opt1 is None or not template_exists),
         type="primary",
         key="run_opt1"
@@ -383,7 +383,7 @@ with tab_plan:
     
     st.divider()
     
-    st.markdown("### CSV + Eigene Vorlage 🪄→✨ fertiger Wochenplan")
+    st.markdown("### 📤 CSV + 📤 Eigene Vorlage 🪄→ fertiger Wochenplan")
     
     csv_file_opt2 = st.file_uploader(
         "CSV-Datei hochladen",
@@ -408,7 +408,7 @@ with tab_plan:
         )
     
     run_opt2 = st.button(
-        "Pipeline starten (mit eigener Vorlage)",
+        "Wochenplan erstellen (mit eigener Vorlage)",
         disabled=(csv_file_opt2 is None or template_file_opt2 is None),
         type="primary",
         key="run_opt2"

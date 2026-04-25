@@ -1117,8 +1117,31 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         if cell:
             ws[cell].value = name
     
-    # Gray out FR, OG, and Rapporte cells on holidays
+    # Gray out FR, OG, Rapporte, and Absences on holidays
     for day in FEIERTAGE:
+        # Gray out Absence range
+        if day in ABW_RANGES:
+            cell_range = ABW_RANGES[day]
+            # Parse range to get all cells
+            start_cell, end_cell = cell_range.split(':')
+            
+            # Extract column letters and row numbers
+            start_col = ''.join(c for c in start_cell if c.isalpha())
+            start_row = int(''.join(c for c in start_cell if c.isdigit()))
+            end_col = ''.join(c for c in end_cell if c.isalpha())
+            end_row = int(''.join(c for c in end_cell if c.isdigit()))
+            
+            # Gray out all cells in the range
+            from openpyxl.utils import column_index_from_string
+            start_col_idx = column_index_from_string(start_col)
+            end_col_idx = column_index_from_string(end_col)
+            
+            for col_idx in range(start_col_idx, end_col_idx + 1):
+                for row in range(start_row, end_row + 1):
+                    from openpyxl.utils import get_column_letter
+                    cell = f"{get_column_letter(col_idx)}{row}"
+                    ws[cell].fill = gray_fill
+        
         # Gray out FR cells
         for site in ["BH", "LI"]:
             fr_cells = FR_CELLS.get(site, {}).get(day, [])
