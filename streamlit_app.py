@@ -195,10 +195,77 @@ tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan", "Personal
 # ===========================================================================
 
 with tab_plan:
+    st.markdown("### Option 1: Dienste aus CSV importieren")
+    st.caption("Lade eine CSV-Datei mit Diensten hoch, um die Vorlage automatisch auszufüllen.")
+    
+    csv_file = st.file_uploader(
+        "CSV-Datei hochladen (optional)",
+        type=["csv"],
+        help="CSV-Datei mit Absenzen und Diensten (Format: Suchname, Bezeichnung, Datum).",
+        key="csv_uploader"
+    )
+    
+    template_file = st.file_uploader(
+        "Leere Wochenplan-Vorlage (.xlsm)",
+        type=["xlsm"],
+        help="Die leere Wochenplan-Vorlage ohne eingetragene Dienste.",
+        key="template_uploader"
+    )
+    
+    if csv_file and template_file:
+        if st.button("CSV importieren und Vorlage ausfüllen", type="primary", key="import_csv_btn"):
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as csv_tmp:
+                    csv_tmp.write(csv_file.getbuffer())
+                    csv_tmp_path = csv_tmp.name
+                
+                with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as tmpl_tmp:
+                    tmpl_tmp.write(template_file.getbuffer())
+                    tmpl_tmp_path = tmpl_tmp.name
+                
+                with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as out_tmp:
+                    out_tmp_path = out_tmp.name
+                
+                with st.spinner("CSV wird importiert..."):
+                    # Load template
+                    wb = load_workbook(tmpl_tmp_path, data_only=False, keep_vba=True)
+                    ws = wb["Wochenplan"]
+                    
+                    # Import CSV
+                    sched.fill_dienste_from_csv(ws, csv_tmp_path)
+                    
+                    # Save filled template
+                    wb.save(out_tmp_path)
+                    wb.close()
+                
+                # Offer download
+                with open(out_tmp_path, "rb") as f:
+                    st.download_button(
+                        "⬇️ Ausgefüllte Vorlage herunterladen",
+                        data=f.read(),
+                        file_name="Wochenplan_mit_Diensten.xlsm",
+                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                    )
+                
+                st.success("✓ CSV erfolgreich importiert! Lade die ausgefüllte Vorlage herunter und verwende sie für die Pipeline.")
+                
+                # Cleanup
+                os.unlink(csv_tmp_path)
+                os.unlink(tmpl_tmp_path)
+                os.unlink(out_tmp_path)
+                
+            except Exception as e:
+                st.error(f"Fehler beim CSV-Import: {e}")
+    
+    st.divider()
+    st.markdown("### Option 2: Bereits ausgefüllte Vorlage verwenden")
+    st.caption("Lade eine Wochenplan-Vorlage hoch, die bereits manuell oder per CSV ausgefüllt wurde.")
+    
     uploaded_file = st.file_uploader(
-        "Leeren .xlsm-Wochenplan hochladen",
+        "Ausgefüllten Wochenplan hochladen",
         type=["xlsm"],
         help="Die Wochenplan-Vorlage mit bereits eingetragenen Absenzen und Diensten.",
+        key="plan_uploader"
     )
 
     col1, col2 = st.columns([1, 2])
