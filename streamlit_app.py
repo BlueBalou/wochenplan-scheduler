@@ -770,6 +770,9 @@ with tab_layout:
     # ---- Save ----
     st.divider()
     if st.button("Alle Änderungen speichern", type="primary", key="save_layout_btn"):
+        # Load current layout to preserve fields not in the editor
+        current_layout = load_layout()
+        
         new_layout = {
             "abw_ranges": {
                 row: abw_edited.at[row, "Bereich"] for row in abw_edited.index
@@ -803,6 +806,11 @@ with tab_layout:
                 "BH": medizin_bh.strip(),
                 "LI": medizin_li.strip(),
             },
+            # Preserve new CSV import fields
+            "vordergrunddienst_cells": current_layout.get("vordergrunddienst_cells", {}),
+            "hintergrunddienst_cells": current_layout.get("hintergrunddienst_cells", {}),
+            "date_cells": current_layout.get("date_cells", {}),
+            "weekday_date_cells": current_layout.get("weekday_date_cells", {}),
         }
         save_layout(new_layout)
         st.success("Layout gespeichert und neu geladen.")

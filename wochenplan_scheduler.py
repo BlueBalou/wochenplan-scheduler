@@ -979,12 +979,14 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         raise ValueError("No Monday found in CSV - cannot determine week start")
     monday_date = mondays.iloc[0]
     
-    # Write date to T20
-    ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%m/%d/%Y')
+    # Write date to T20 (if date_cells exist in layout)
+    if DATE_CELLS and "first_monday" in DATE_CELLS:
+        ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%m/%d/%Y')
     
     # Calculate and write KW (ISO week number)
-    kw = monday_date.isocalendar()[1]
-    ws[DATE_CELLS["kw_number"]].value = f"KW {kw}"
+    if DATE_CELLS and "kw_number" in DATE_CELLS:
+        kw = monday_date.isocalendar()[1]
+        ws[DATE_CELLS["kw_number"]].value = f"KW {kw}"
     
     # Dienst type mapping
     ABSENZ_TYPES = {
