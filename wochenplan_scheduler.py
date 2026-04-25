@@ -1035,15 +1035,24 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
             hintergrund_by_day[day_name] = abbrev_name
     
     # Write to Excel
-    # Absences - write to first cell of range
+    # Absences - write each name to separate row
     for day, names in absences_by_day.items():
         if names and day in ABW_RANGES:
             cell_range = ABW_RANGES[day]
-            # Extract first cell from range (e.g., "T94:AC108" → "T94")
-            first_cell = cell_range.split(':')[0]
-            ws[first_cell].value = ", ".join(sorted(set(names)))
+            # Parse range: "T94:AC108" → start_col="T", start_row=94
+            from openpyxl.utils import column_index_from_string, get_column_letter
+            
+            start_cell = cell_range.split(':')[0]
+            # Extract column letter and row number
+            col_letter = ''.join(c for c in start_cell if c.isalpha())
+            start_row = int(''.join(c for c in start_cell if c.isdigit()))
+            
+            # Write each name to a new row
+            for idx, name in enumerate(sorted(set(names))):
+                cell = f"{col_letter}{start_row + idx}"
+                ws[cell].value = name
     
-    # Nachtdienst - single cell per day
+    # Nachtdienst - single cell per day (already a range, write to first cell)
     for day, name in nacht_by_day.items():
         if day in NACHT_RANGES:
             cell_range = NACHT_RANGES[day]

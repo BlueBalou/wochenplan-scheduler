@@ -22,6 +22,7 @@ import wochenplan_scheduler as sched
 STAFF_JSON  = Path(__file__).parent / "staff.json"
 LAYOUT_JSON = Path(__file__).parent / "layout.json"
 MEETING_POOLS_JSON = Path(__file__).parent / "meeting_pools.json"
+TEMPLATE_XLSM = Path(__file__).parent / "KW_xx_TEMPLATE.xlsm"
 OG_LIST_NO_LAUFEN = [og for og in sched.OG_LIST if og != "Laufen"]
 ALL_WEEKDAYS = sched.WEEKDAYS  # ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag"]
 
@@ -188,201 +189,9 @@ def save_meeting_pools(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
     sched.load_meeting_pools_from_json(str(MEETING_POOLS_JSON))
 
-tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan", "Personalverwaltung", "Rapporte-Pools", "Layout-Editor"])
 
 # ===========================================================================
-# TAB 1 — Wochenplan
-# ===========================================================================
-
-with tab_plan:
-    st.markdown("### Option 1: Dienste aus CSV importieren")
-    st.caption("Lade eine CSV-Datei mit Diensten hoch, um die Vorlage automatisch auszufüllen.")
-    
-    csv_file = st.file_uploader(
-        "CSV-Datei hochladen (optional)",
-        type=["csv"],
-        help="CSV-Datei mit Absenzen und Diensten (Format: Suchname, Bezeichnung, Datum).",
-        key="csv_uploader"
-    )
-    
-    template_file = st.file_uploader(
-        "Leere Wochenplan-Vorlage (.xlsm)",
-        type=["xlsm"],
-        help="Die leere Wochenplan-Vorlage ohne eingetragene Dienste.",
-        key="template_uploader"
-    )
-    
-    if csv_file and template_file:
-        if st.button("CSV importieren und Vorlage ausfüllen", type="primary", key="import_csv_btn"):
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as csv_tmp:
-                    csv_tmp.write(csv_file.getbuffer())
-                    csv_tmp_path = csv_tmp.name
-                
-                with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as tmpl_tmp:
-                    tmpl_tmp.write(template_file.getbuffer())
-                    tmpl_tmp_path = tmpl_tmp.name
-                
-                with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as out_tmp:
-                    out_tmp_path = out_tmp.name
-                
-                with st.spinner("CSV wird importiert..."):
-                    # Load template
-                    wb = load_workbook(tmpl_tmp_path, data_only=False, keep_vba=True)
-                    ws = wb["Wochenplan"]
-                    
-                    # Import CSV
-                    sched.fill_dienste_from_csv(ws, csv_tmp_path)
-                    
-                    # Save filled template
-                    wb.save(out_tmp_path)
-                    wb.close()
-                
-                # Offer download
-                with open(out_tmp_path, "rb") as f:
-                    st.download_button(
-                        "⬇️ Ausgefüllte Vorlage herunterladen",
-                        data=f.read(),
-                        file_name="Wochenplan_mit_Diensten.xlsm",
-                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
-                    )
-                
-                st.success("✓ CSV erfolgreich importiert! Lade die ausgefüllte Vorlage herunter und verwende sie für die Pipeline.")
-                
-                # Cleanup
-                os.unlink(csv_tmp_path)
-                os.unlink(tmpl_tmp_path)
-                os.unlink(out_tmp_path)
-                
-            except Exception as e:
-                st.error(f"Fehler beim CSV-Import: {e}")
-    
-    st.divider()
-    st.markdown("### Option 2: Bereits ausgefüllte Vorlage verwenden")
-    st.caption("Lade eine Wochenplan-Vorlage hoch, die bereits manuell oder per CSV ausgefüllt wurde.")
-    
-    uploaded_file = st.file_uploader(
-        "Ausgefüllten Wochenplan hochladen",
-        type=["xlsm"],
-        help="Die Wochenplan-Vorlage mit bereits eingetragenen Absenzen und Diensten.",
-        key="plan_uploader"
-    )
-
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        seed = st.number_input("Seed", value=1234, step=1, format="%d",
-                               help="Zufalls-Seed für reproduzierbare Ergebnisse.")
-
-    run_btn = st.button(
-        "Pipeline starten",
-        disabled=(uploaded_file is None),
-        type="primary",
-    )
-
-    if run_btn and uploaded_file is not None:
-        input_tmp_path = None
-        output_tmp_path = None
-        try:
-            # Write upload to a named temp file (openpyxl needs a path)
-            with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as f_in:
-                f_in.write(uploaded_file.getbuffer())
-                input_tmp_path = f_in.name
-
-            with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as f_out:
-                output_tmp_path = f_out.name
-
-            with st.spinner("Pipeline läuft…"):
-                # Configure Laufen days for this run
-                laufen_days = st.session_state.get("laufen_days", ["Dienstag"])
-                sched.LAUFEN_DAYS.clear()
-                sched.LAUFEN_DAYS.update(laufen_days)
-
-                # Reset all counters for a clean run
-                sched.reset_all_counters()
-
-                # Load workbook
-                wb = load_workbook(input_tmp_path, data_only=False, keep_vba=True)
-                ws = wb["Wochenplan"]
-
-                # Stage 0: cleanup
-                sched.cleanup_blocks(ws, clear_fr=True, clear_og=True, clear_meetings=True)
-
-                # Stage 1: read absences
-                absences = sched.read_absences_by_day(ws)
-
-                # Stage 2: OG leaders
-                sched.assign_la_to_ogs(ws, absences)
-
-                # Stage 3: OG non-leaders + coverage flags
-                sched.assign_nonleaders_to_ogs(ws, absences, seed=int(seed))
-
-                # Stage 4: FR shifts
-                sched.assign_fr_shifts_to_cells(ws, absences, seed=int(seed))
-
-                # Stage 5: meetings
-                sched.assign_meetings(ws, absences, seed=int(seed))
-
-                # Save and restore dropped OOXML parts
-                wb.save(output_tmp_path)
-                sched.patch_xlsm(output_tmp_path, input_tmp_path)
-
-                with open(output_tmp_path, "rb") as f:
-                    result_bytes = f.read()
-
-            base = uploaded_file.name.rsplit(".", 1)[0]
-            st.session_state["result_bytes"] = result_bytes
-            st.session_state["result_filename"] = f"{base}_FINAL.xlsm"
-            st.success("Pipeline erfolgreich abgeschlossen.")
-
-        except KeyError as e:
-            st.error(
-                f"Blatt 'Wochenplan' nicht gefunden oder unerwartete Struktur. "
-                f"Details: {e}"
-            )
-            st.session_state["result_bytes"] = None
-        except Exception as e:
-            st.error(f"Fehler während der Pipeline: {e}")
-            st.session_state["result_bytes"] = None
-        finally:
-            for p in (input_tmp_path, output_tmp_path):
-                if p and os.path.exists(p):
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
-
-    # Download button and stats — persisted in session_state across re-runs
-    if st.session_state["result_bytes"] is not None:
-        st.download_button(
-            label="Ergebnis herunterladen (.xlsm)",
-            data=st.session_state["result_bytes"],
-            file_name=st.session_state["result_filename"],
-            mime="application/vnd.ms-excel.sheet.macroEnabled.12",
-        )
-
-        st.subheader("Wochenstatistik")
-        stats_rows = [
-            {
-                "Name": s.name,
-                "Rolle": s.role,
-                "Standort": s.site,
-                "Frontarzt": s.fr_shifts_count,
-                "Rapporte": s.meetings_count,
-            }
-            for s in sorted(sched.staff_by_name.values(), key=lambda x: x.name)
-            if s.fr_shifts_count > 0 or s.meetings_count > 0
-        ]
-        if stats_rows:
-            st.dataframe(
-                pd.DataFrame(stats_rows),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("Alle Zählerstände sind 0 — Pipeline wurde noch nicht ausgeführt.")
-
-# ===========================================================================
-# TAB 2 — Personalverwaltung
+# Helper Functions
 # ===========================================================================
 
 def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
@@ -464,6 +273,254 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
     return None
 
 
+tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan", "Personalverwaltung", "Rapporte-Pools", "Layout-Editor"])
+
+# ===========================================================================
+# TAB 1 — Wochenplan
+# ===========================================================================
+
+with tab_plan:
+    st.markdown("### 🗂️ Vorlage verwalten")
+    st.caption("Lade eine neue leere Vorlage hoch, um die Standard-Vorlage zu ersetzen.")
+    
+    with st.expander("Neue Vorlage hochladen"):
+        st.info("⚠️ Vorlage muss 'KW_xx_TEMPLATE.xlsm' heissen")
+        
+        new_template = st.file_uploader(
+            "Neue Vorlage hochladen",
+            type=["xlsm"],
+            help="Die neue leere Wochenplan-Vorlage. Muss 'KW_xx_TEMPLATE.xlsm' heissen.",
+            key="new_template_uploader"
+        )
+        
+        if new_template:
+            if new_template.name != "KW_xx_TEMPLATE.xlsm":
+                st.error(f"❌ Dateiname muss 'KW_xx_TEMPLATE.xlsm' sein (aktuell: '{new_template.name}')")
+            else:
+                if st.button("Vorlage ersetzen", type="primary", key="replace_template_btn"):
+                    try:
+                        with open(TEMPLATE_XLSM, "wb") as f:
+                            f.write(new_template.getbuffer())
+                        st.success("✓ Vorlage erfolgreich ersetzt!")
+                    except Exception as e:
+                        st.error(f"Fehler beim Ersetzen: {e}")
+    
+    st.divider()
+    
+    # Check if template exists
+    template_exists = TEMPLATE_XLSM.exists()
+    if not template_exists:
+        st.warning("⚠️ Keine 'KW_xx_TEMPLATE.xlsm' gefunden. Bitte lade eine Vorlage hoch (oben).")
+    
+    st.markdown("### Option 1: CSV → Standard-Vorlage → Vollständige Pipeline")
+    st.caption("Lade nur eine CSV-Datei hoch. Die Standard-Vorlage wird automatisch geladen.")
+    
+    if template_exists:
+        st.info("📄 Leere 'KW_xx_TEMPLATE.xlsm' wird ausgefüllt")
+    
+    csv_file_opt1 = st.file_uploader(
+        "CSV-Datei hochladen",
+        type=["csv"],
+        help="CSV-Datei mit Absenzen und Diensten.",
+        key="csv_opt1",
+        disabled=not template_exists
+    )
+    
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        seed_opt1 = st.number_input(
+            "Seed", value=1234, step=1, format="%d",
+            help="Zufalls-Seed für reproduzierbare Ergebnisse.",
+            key="seed_opt1"
+        )
+    
+    run_opt1 = st.button(
+        "Pipeline starten (mit Standard-Vorlage)",
+        disabled=(csv_file_opt1 is None or not template_exists),
+        type="primary",
+        key="run_opt1"
+    )
+    
+    if run_opt1 and csv_file_opt1 and template_exists:
+        csv_tmp_path = None
+        output_tmp_path = None
+        try:
+            # Save CSV to temp
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as csv_tmp:
+                csv_tmp.write(csv_file_opt1.getbuffer())
+                csv_tmp_path = csv_tmp.name
+            
+            with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as f_out:
+                output_tmp_path = f_out.name
+            
+            with st.spinner("Pipeline läuft…"):
+                # Configure Laufen days
+                laufen_days = st.session_state.get("laufen_days", ["Dienstag"])
+                sched.LAUFEN_DAYS.clear()
+                sched.LAUFEN_DAYS.update(laufen_days)
+                
+                # Reset counters
+                sched.reset_all_counters()
+                
+                # Load template from disk
+                wb = load_workbook(str(TEMPLATE_XLSM), data_only=False, keep_vba=True)
+                ws = wb["Wochenplan"]
+                
+                # Stage 0: Cleanup
+                sched.cleanup_blocks(ws, clear_fr=True, clear_og=True, clear_meetings=True)
+                
+                # Stage 0.5: CSV import
+                sched.fill_dienste_from_csv(ws, csv_tmp_path)
+                
+                # Read absences
+                absences = sched.read_absences_by_day(ws)
+                
+                # Stage 1: OG
+                sched.assign_la_to_ogs(ws, absences)
+                sched.assign_nonleaders_to_ogs(ws, absences, seed=seed_opt1)
+                
+                # Stage 2: FR
+                sched.assign_fr_shifts_to_cells(ws, absences, seed=seed_opt1)
+                
+                # Stage 3: Meetings
+                sched.assign_meetings(ws, absences, seed=seed_opt1)
+                
+                # Save
+                wb.save(output_tmp_path)
+                wb.close()
+            
+            # Offer download
+            with open(output_tmp_path, "rb") as f:
+                st.download_button(
+                    "⬇️ Finaler Wochenplan herunterladen",
+                    data=f.read(),
+                    file_name="Wochenplan_FINAL.xlsm",
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                )
+            
+            st.success("✔ Pipeline erfolgreich abgeschlossen!")
+            sched.print_weekly_stats()
+            
+        except Exception as e:
+            st.error(f"Fehler: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+        finally:
+            if csv_tmp_path and os.path.exists(csv_tmp_path):
+                os.unlink(csv_tmp_path)
+            if output_tmp_path and os.path.exists(output_tmp_path):
+                os.unlink(output_tmp_path)
+    
+    st.divider()
+    
+    st.markdown("### Option 2: CSV + Eigene Vorlage → Vollständige Pipeline")
+    st.caption("Lade CSV-Datei und eine eigene .xlsm-Vorlage hoch.")
+    
+    csv_file_opt2 = st.file_uploader(
+        "CSV-Datei hochladen",
+        type=["csv"],
+        help="CSV-Datei mit Absenzen und Diensten.",
+        key="csv_opt2"
+    )
+    
+    template_file_opt2 = st.file_uploader(
+        "Eigene Wochenplan-Vorlage (.xlsm) hochladen",
+        type=["xlsm"],
+        help="Eine eigene leere oder teilweise ausgefüllte Vorlage.",
+        key="template_opt2"
+    )
+    
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        seed_opt2 = st.number_input(
+            "Seed", value=1234, step=1, format="%d",
+            help="Zufalls-Seed für reproduzierbare Ergebnisse.",
+            key="seed_opt2"
+        )
+    
+    run_opt2 = st.button(
+        "Pipeline starten (mit eigener Vorlage)",
+        disabled=(csv_file_opt2 is None or template_file_opt2 is None),
+        type="primary",
+        key="run_opt2"
+    )
+    
+    if run_opt2 and csv_file_opt2 and template_file_opt2:
+        csv_tmp_path = None
+        template_tmp_path = None
+        output_tmp_path = None
+        try:
+            # Save files to temp
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as csv_tmp:
+                csv_tmp.write(csv_file_opt2.getbuffer())
+                csv_tmp_path = csv_tmp.name
+            
+            with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as tmpl_tmp:
+                tmpl_tmp.write(template_file_opt2.getbuffer())
+                template_tmp_path = tmpl_tmp.name
+            
+            with tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as f_out:
+                output_tmp_path = f_out.name
+            
+            with st.spinner("Pipeline läuft…"):
+                # Configure Laufen days
+                laufen_days = st.session_state.get("laufen_days", ["Dienstag"])
+                sched.LAUFEN_DAYS.clear()
+                sched.LAUFEN_DAYS.update(laufen_days)
+                
+                # Reset counters
+                sched.reset_all_counters()
+                
+                # Load uploaded template
+                wb = load_workbook(template_tmp_path, data_only=False, keep_vba=True)
+                ws = wb["Wochenplan"]
+                
+                # Stage 0: Cleanup
+                sched.cleanup_blocks(ws, clear_fr=True, clear_og=True, clear_meetings=True)
+                
+                # Stage 0.5: CSV import
+                sched.fill_dienste_from_csv(ws, csv_tmp_path)
+                
+                # Read absences
+                absences = sched.read_absences_by_day(ws)
+                
+                # Stage 1: OG
+                sched.assign_la_to_ogs(ws, absences)
+                sched.assign_nonleaders_to_ogs(ws, absences, seed=seed_opt2)
+                
+                # Stage 2: FR
+                sched.assign_fr_shifts_to_cells(ws, absences, seed=seed_opt2)
+                
+                # Stage 3: Meetings
+                sched.assign_meetings(ws, absences, seed=seed_opt2)
+                
+                # Save
+                wb.save(output_tmp_path)
+                wb.close()
+            
+            # Offer download
+            with open(output_tmp_path, "rb") as f:
+                st.download_button(
+                    "⬇️ Finaler Wochenplan herunterladen",
+                    data=f.read(),
+                    file_name="Wochenplan_FINAL.xlsm",
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                )
+            
+            st.success("✔ Pipeline erfolgreich abgeschlossen!")
+            sched.print_weekly_stats()
+            
+        except Exception as e:
+            st.error(f"Fehler: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+        finally:
+            if csv_tmp_path and os.path.exists(csv_tmp_path):
+                os.unlink(csv_tmp_path)
+            if template_tmp_path and os.path.exists(template_tmp_path):
+                os.unlink(template_tmp_path)
+            if output_tmp_path and os.path.exists(output_tmp_path):
+                os.unlink(output_tmp_path)
 with tab_personal:
     st.subheader("Personalbestand")
 
