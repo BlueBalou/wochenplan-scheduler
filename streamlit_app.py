@@ -286,7 +286,7 @@ with tab_plan:
     if not template_exists:
         st.warning("⚠️ Keine 'KW_xx_TEMPLATE.xlsm' gefunden. Bitte lade eine Vorlage hoch (unten).")
     
-    st.markdown("### CSV ✨ Standard-Vorlage ✨ fertiger Wochenplan")
+    st.markdown("### CSV 🪄→✨ Standard-Vorlage 🪄→✨ fertiger Wochenplan")
     
     csv_file_opt1 = st.file_uploader(
         "CSV-Datei hochladen",
@@ -383,7 +383,7 @@ with tab_plan:
     
     st.divider()
     
-    st.markdown("### CSV + Eigene Vorlage ✨ fertiger Wochenplan")
+    st.markdown("### CSV + Eigene Vorlage 🪄→✨ fertiger Wochenplan")
     
     csv_file_opt2 = st.file_uploader(
         "CSV-Datei hochladen",
@@ -395,7 +395,7 @@ with tab_plan:
     template_file_opt2 = st.file_uploader(
         "Eigene Wochenplan-Vorlage (.xlsm) hochladen",
         type=["xlsm"],
-        help="Lade CSV-Datei und eine eigene .xlsm-Vorlage hoch.",
+        help="Lade eine eigene .xlsm-Vorlage hoch.",
         key="template_opt2"
     )
     
@@ -493,30 +493,49 @@ with tab_plan:
     
     st.divider()
     
+    st.markdown("### 🎉 Feiertage")
+    st.caption("Wähle Wochentage, die als Feiertage behandelt werden sollen (keine Absenzen, OG, FR, Rapporte).")
+    
+    # Load current feiertage from layout
+    layout = load_layout()
+    current_feiertage = layout.get("feiertage", [])
+    
+    feiertage_selected = st.multiselect(
+        "Feiertage",
+        options=["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"],
+        default=current_feiertage,
+        help="An diesen Tagen werden nur Nacht-, Hintergrund- und Vordergrunddienste eingeplant.",
+        key="feiertage_select"
+    )
+    
+    if st.button("Feiertage speichern", type="primary", key="save_feiertage_btn"):
+        layout["feiertage"] = feiertage_selected
+        save_layout(layout)
+        st.success(f"✓ Feiertage gespeichert: {', '.join(feiertage_selected) if feiertage_selected else 'Keine'}")
+        st.rerun()
+    
+    st.divider()
+    
     st.markdown("### 🗂️ Vorlage verwalten")
     st.caption("Lade eine neue leere Vorlage hoch, um die Standard-Vorlage zu ersetzen.")
     
     with st.expander("Neue Vorlage hochladen"):
-        st.info("⚠️ Vorlage muss 'KW_xx_TEMPLATE.xlsm' heissen")
         
         new_template = st.file_uploader(
             "Neue Vorlage hochladen",
             type=["xlsm"],
-            help="Die neue leere Wochenplan-Vorlage. Muss 'KW_xx_TEMPLATE.xlsm' heissen.",
+            help="Die neue leere Wochenplan-Vorlage. Wird automatisch als 'KW_xx_TEMPLATE.xlsm' gespeichert.",
             key="new_template_uploader"
         )
         
         if new_template:
-            if new_template.name != "KW_xx_TEMPLATE.xlsm":
-                st.error(f"❌ Dateiname muss 'KW_xx_TEMPLATE.xlsm' sein (aktuell: '{new_template.name}')")
-            else:
-                if st.button("Vorlage ersetzen", type="primary", key="replace_template_btn"):
-                    try:
-                        with open(TEMPLATE_XLSM, "wb") as f:
-                            f.write(new_template.getbuffer())
-                        st.success("✓ Vorlage erfolgreich ersetzt!")
-                    except Exception as e:
-                        st.error(f"Fehler beim Ersetzen: {e}")
+            if st.button("Vorlage ersetzen", type="primary", key="replace_template_btn"):
+                try:
+                    with open(TEMPLATE_XLSM, "wb") as f:
+                        f.write(new_template.getbuffer())
+                    st.success(f"✓ '{new_template.name}' wurde als 'KW_xx_TEMPLATE.xlsm' gespeichert!")
+                except Exception as e:
+                    st.error(f"Fehler beim Ersetzen: {e}")
 
 # ===========================================================================
 # TAB 2 — Personalverwaltung
@@ -767,6 +786,23 @@ with tab_layout:
         medizin_bh = mc1.text_input("BH", value=_mc.get("BH", ""), key="medizin_bh")
         medizin_li = mc2.text_input("LI", value=_mc.get("LI", ""), key="medizin_li")
 
+    # ---- Feiertage Merge Cells ----
+    with st.expander("Zusammenführen von Zellen bei Feiertagen"):
+        st.caption("Zellbereiche für Vordergrunddienst an Feiertagen (z.B. T23:AC24)")
+        _fmc = layout.get("feiertage_merge_cells", {})
+        
+        fmc_rows = []
+        for day in ALL_WEEKDAYS:
+            fmc_rows.append({"Tag": day, "Bereich": _fmc.get(day, "")})
+        
+        fmc_df = pd.DataFrame(fmc_rows).set_index("Tag")
+        feiertage_merge_edited = st.data_editor(
+            fmc_df, 
+            key="feiertage_merge_ed", 
+            use_container_width=True,
+            height=250
+        )
+
     # ---- Save ----
     st.divider()
     if st.button("Alle Änderungen speichern", type="primary", key="save_layout_btn"):
@@ -810,11 +846,15 @@ with tab_layout:
                 "BH": medizin_bh.strip(),
                 "LI": medizin_li.strip(),
             },
+            "feiertage_merge_cells": {
+                row: feiertage_merge_edited.at[row, "Bereich"] for row in feiertage_merge_edited.index
+            },
             # Preserve new CSV import fields
             "vordergrunddienst_cells": current_layout.get("vordergrunddienst_cells", {}),
             "hintergrunddienst_cells": current_layout.get("hintergrunddienst_cells", {}),
             "date_cells": current_layout.get("date_cells", {}),
             "weekday_date_cells": current_layout.get("weekday_date_cells", {}),
+            "feiertage": current_layout.get("feiertage", []),
         }
         save_layout(new_layout)
         st.success("Layout gespeichert und neu geladen.")

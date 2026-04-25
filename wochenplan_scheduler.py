@@ -171,6 +171,8 @@ VORDERGRUNDDIENST_CELLS: Dict[str, str]                                = {}
 HINTERGRUNDDIENST_CELLS: Dict[str, str]                                = {}
 DATE_CELLS:        Dict[str, str]                                      = {}
 WEEKDAY_DATE_CELLS: Dict[str, str]                                     = {}
+FEIERTAGE:         Set[str]                                            = set()
+FEIERTAGE_MERGE_CELLS: Dict[str, str]                                  = {}
 
 
 def load_layout_from_json(path: str) -> None:
@@ -217,6 +219,12 @@ def load_layout_from_json(path: str) -> None:
 
     WEEKDAY_DATE_CELLS.clear()
     WEEKDAY_DATE_CELLS.update(data.get("weekday_date_cells", {}))
+
+    FEIERTAGE.clear()
+    FEIERTAGE.update(data.get("feiertage", []))
+
+    FEIERTAGE_MERGE_CELLS.clear()
+    FEIERTAGE_MERGE_CELLS.update(data.get("feiertage_merge_cells", {}))
 
 
 # layout.json holds all Excel cell-coordinate maps.
@@ -491,6 +499,8 @@ def assign_fr_shifts_to_cells(
                                    include_laufen_from_og=include_laufen_from_og)
 
     for day in WEEKDAYS:
+        if day in FEIERTAGE:
+            continue  # Skip holidays
         # BH: unchanged
         used = set()
         for a1 in FR_CELLS["BH"][day]:
@@ -546,6 +556,8 @@ def assign_la_to_ogs(ws: Worksheet, absences_by_day: Dict[str, Set[str]]) -> Dic
     reset_og_counts()
 
     for day in WEEKDAYS:
+        if day in FEIERTAGE:
+            continue  # Skip holidays
         abs_today = absences_by_day.get(day, set())
 
         for og in OG_LIST:
@@ -604,6 +616,8 @@ def _place_in_og(ws: Worksheet, day: str, og: str, name: str, count_for_fa: bool
 def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]], seed: Optional[int]=None) -> Dict[str,Dict[str,int]]:
     rng = random.Random(seed)
     for day in WEEKDAYS:
+        if day in FEIERTAGE:
+            continue  # Skip holidays
         abs_today = absences_by_day.get(day,set())
 
         # 1) non-leader OAs with rotations (skip Laufen)
@@ -814,6 +828,8 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], seed: Optional
         fallback_style     = "red_bold" if roter_fallback else "black"
 
         for day, cells in mtg_cells.items():
+            if day in FEIERTAGE:
+                continue  # Skip holidays
             if not cells:
                 continue
 
@@ -1029,16 +1045,25 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
             site = "BH" if dienst_type.startswith("Bh-") else "LI"
             spaet_by_day[site][day_name] = abbrev_name
         
-        elif "Pikett_24h_Sa/So" in dienst_type or "Tagdienst Sa/So" in dienst_type:
-            if day_name in ["Samstag", "Sonntag"]:
-                vordergrund_by_day[day_name] = abbrev_name
+        # Vordergrunddienst - specific weekend dienste
+        elif "Pikett_Vormittag_Sa/So" in dienst_type:
+            vordergrund_by_day[day_name] = abbrev_name
         
+        elif "Tagdienst Sa/So" in dienst_type:
+            vordergrund_by_day[day_name] = abbrev_name
+        
+        # Hintergrunddienst - all Pikett types (including Pikett_24h_Sa/So)
         elif "Pikett" in dienst_type:
             hintergrund_by_day[day_name] = abbrev_name
     
     # Write to Excel
-    # Absences - write each name to separate row
+    from openpyxl.styles import PatternFill
+    gray_fill = PatternFill(start_color="D0CECE", end_color="D0CECE", fill_type="solid")
+    
+    # Absences - write each name to separate row (skip on holidays)
     for day, names in absences_by_day.items():
+        if day in FEIERTAGE:
+            continue  # Skip absences on holidays
         if names and day in ABW_RANGES:
             cell_range = ABW_RANGES[day]
             # Parse range: "T94:AC108" → start_col="T", start_row=94
@@ -1054,31 +1079,64 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
                 cell = f"{col_letter}{start_row + idx}"
                 ws[cell].value = name
     
-    # Nachtdienst - single cell per day (already a range, write to first cell)
+    # Nachtdienst - single cell per day (write on all days including holidays)
     for day, name in nacht_by_day.items():
         if day in NACHT_RANGES:
             cell_range = NACHT_RANGES[day]
             first_cell = cell_range.split(':')[0]
             ws[first_cell].value = name
     
-    # Spätdienst
+    # Spätdienst (normal days)
     for site in ["BH", "LI"]:
         for day, name in spaet_by_day[site].items():
+            if day in FEIERTAGE:
+                continue  # Handled separately below
             cell = SPAETDIENST_CELLS.get(site, {}).get(day)
             if cell:
                 ws[cell].value = name
     
-    # Vordergrunddienst
+    # Vordergrunddienst (holidays and weekends)
     for day, name in vordergrund_by_day.items():
-        cell = VORDERGRUNDDIENST_CELLS.get(day)
-        if cell:
-            ws[cell].value = name
+        if day in FEIERTAGE:
+            # On holidays: Merge cells using FEIERTAGE_MERGE_CELLS
+            merge_range = FEIERTAGE_MERGE_CELLS.get(day)
+            if merge_range:
+                ws.merge_cells(merge_range)
+                # Write to first cell of range
+                first_cell = merge_range.split(':')[0]
+                ws[first_cell].value = name
+        else:
+            # Normal weekend: Write to Vordergrunddienst cell
+            cell = VORDERGRUNDDIENST_CELLS.get(day)
+            if cell:
+                ws[cell].value = name
     
-    # Hintergrunddienst
+    # Hintergrunddienst (write on all days including holidays)
     for day, name in hintergrund_by_day.items():
         cell = HINTERGRUNDDIENST_CELLS.get(day)
         if cell:
             ws[cell].value = name
+    
+    # Gray out FR, OG, and Rapporte cells on holidays
+    for day in FEIERTAGE:
+        # Gray out FR cells
+        for site in ["BH", "LI"]:
+            fr_cells = FR_CELLS.get(site, {}).get(day, [])
+            for cell in fr_cells:
+                ws[cell].fill = gray_fill
+        
+        # Gray out OG cells
+        for og in OG_CELLS:
+            og_cells = OG_CELLS[og].get(day, [])
+            for cell in og_cells:
+                ws[cell].fill = gray_fill
+        
+        # Gray out Rapporte cells
+        for site in ["BH", "LI"]:
+            for mtg_name, mtg_days in MEETING_CELLS.get(site, {}).items():
+                mtg_cells = mtg_days.get(day, [])
+                for cell in mtg_cells:
+                    ws[cell].fill = gray_fill
 
 
 if __name__ == "__main__":
