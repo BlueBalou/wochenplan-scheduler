@@ -167,6 +167,10 @@ FR_CELLS:          Dict[str, Dict[str, Tuple[str, ...]]]               = {}
 OG_CELLS:          Dict[str, Dict[str, Tuple[str, ...]]]               = {}
 MEETING_CELLS:     Dict[str, Dict[str, Dict[str, Tuple[str, ...]]]]    = {}
 MEDIZIN_MONDAY_CELLS: Dict[str, str]                                   = {}
+VORDERGRUNDDIENST_CELLS: Dict[str, str]                                = {}
+HINTERGRUNDDIENST_CELLS: Dict[str, str]                                = {}
+DATE_CELLS:        Dict[str, str]                                      = {}
+WEEKDAY_DATE_CELLS: Dict[str, str]                                     = {}
 
 
 def load_layout_from_json(path: str) -> None:
@@ -201,6 +205,18 @@ def load_layout_from_json(path: str) -> None:
 
     MEDIZIN_MONDAY_CELLS.clear()
     MEDIZIN_MONDAY_CELLS.update(data.get("medizin_monday_cells", {}))
+
+    VORDERGRUNDDIENST_CELLS.clear()
+    VORDERGRUNDDIENST_CELLS.update(data.get("vordergrunddienst_cells", {}))
+
+    HINTERGRUNDDIENST_CELLS.clear()
+    HINTERGRUNDDIENST_CELLS.update(data.get("hintergrunddienst_cells", {}))
+
+    DATE_CELLS.clear()
+    DATE_CELLS.update(data.get("date_cells", {}))
+
+    WEEKDAY_DATE_CELLS.clear()
+    WEEKDAY_DATE_CELLS.update(data.get("weekday_date_cells", {}))
 
 
 # layout.json holds all Excel cell-coordinate maps.
@@ -893,6 +909,167 @@ def patch_xlsm(output_path: str, input_path: str) -> None:
 # Skip cleanup: append -nocleanup
 # keep intermediates: append --keep
 
+# ===========================================================================
+# CSV Import Functions
+# ===========================================================================
+
+def csv_name_to_abbreviated(csv_name: str) -> str:
+    """
+    Convert CSV name format to abbreviated format used in staff.json.
+    
+    Rules:
+    - Only use the FIRST given name
+    - Handle hyphens within that first name
+    - Normalize á→a (not available on German/Swiss keyboards)
+    - Keep other special characters (é, ä, ö, ü)
+    
+    Examples:
+        "Brandenberger Daniel" → "D. Brandenberger"
+        "Ott Hans-Werner" → "H.W. Ott"  (hyphenated first name)
+        "Rasch Helmut Fritz" → "H. Rasch"  (ignore "Fritz")
+        "Páli Steven" → "S. Pali"  (á→a)
+        "Vitéz Steven" → "S. Vitéz"  (é preserved)
+    """
+    parts = csv_name.strip().split()
+    if len(parts) < 2:
+        return csv_name  # Return as-is if format unexpected
+    
+    surname = parts[0]
+    first_given_name = parts[1]  # Only take first given name, ignore rest
+    
+    # Normalize á→a (both lowercase and uppercase)
+    surname = surname.replace('á', 'a').replace('Á', 'A')
+    first_given_name = first_given_name.replace('á', 'a').replace('Á', 'A')
+    
+    # Extract first letter of each part (handle hyphens within first name)
+    # "Hans-Werner" → ["Hans", "Werner"] → "H.W."
+    # "Daniel" → ["Daniel"] → "D."
+    initials = []
+    for part in first_given_name.split("-"):
+        if part:  # Skip empty parts
+            initials.append(part[0].upper())
+    
+    initials_str = ".".join(initials) + "." if initials else ""
+    return f"{initials_str} {surname}" if initials_str else surname
+
+
+def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
+    """
+    Read dienste and absences from CSV and fill into Excel template.
+    
+    Args:
+        ws: openpyxl worksheet to fill
+        csv_path: Path to CSV file with dienste data
+    """
+    import pandas as pd
+    from datetime import datetime
+    
+    # Try UTF-8 first (better special character support), fallback to ISO-8859-1
+    try:
+        df = pd.read_csv(csv_path, sep=';', encoding='utf-8')
+    except UnicodeDecodeError:
+        df = pd.read_csv(csv_path, sep=';', encoding='ISO-8859-1')
+    
+    # Parse dates
+    df['Datum'] = pd.to_datetime(df['Datum'], format='%d.%m.%Y')
+    
+    # Find Monday of the week (first day)
+    mondays = df[df['Datum'].dt.dayofweek == 0]['Datum']
+    if len(mondays) == 0:
+        raise ValueError("No Monday found in CSV - cannot determine week start")
+    monday_date = mondays.iloc[0]
+    
+    # Write date to T20
+    ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%m/%d/%Y')
+    
+    # Calculate and write KW (ISO week number)
+    kw = monday_date.isocalendar()[1]
+    ws[DATE_CELLS["kw_number"]].value = f"KW {kw}"
+    
+    # Dienst type mapping
+    ABSENZ_TYPES = {
+        "Frei", "Frei-Wunsch", "Kompensation", "Kompensation fix",
+        "Externer Arbeitseinsatz", "Fort- und Weiterbildung ohne Zeitanrechnung",
+        "Ferien", "Flexitag"
+    }
+    
+    # Day name mapping (German date to layout key)
+    day_names = {
+        0: "Montag", 1: "Dienstag", 2: "Mittwoch",
+        3: "Donnerstag", 4: "Freitag", 5: "Samstag", 6: "Sonntag"
+    }
+    
+    # Collect data by day and type
+    absences_by_day = {d: [] for d in day_names.values()}
+    nacht_by_day = {}
+    spaet_by_day = {"BH": {}, "LI": {}}
+    vordergrund_by_day = {}
+    hintergrund_by_day = {}
+    
+    # Process each row
+    for _, row in df.iterrows():
+        dienst_type = row['Bezeichnung']
+        csv_name = row['Suchname']
+        date = row['Datum']
+        day_name = day_names[date.dayofweek]
+        
+        # Convert name format
+        abbrev_name = csv_name_to_abbreviated(csv_name)
+        
+        # Categorize dienst
+        if dienst_type in ABSENZ_TYPES:
+            absences_by_day[day_name].append(abbrev_name)
+        
+        elif "Nachtdienst" in dienst_type:
+            nacht_by_day[day_name] = abbrev_name
+        
+        elif "Spätdienst" in dienst_type:
+            site = "BH" if dienst_type.startswith("Bh-") else "LI"
+            spaet_by_day[site][day_name] = abbrev_name
+        
+        elif "Pikett_24h_Sa/So" in dienst_type or "Tagdienst Sa/So" in dienst_type:
+            if day_name in ["Samstag", "Sonntag"]:
+                vordergrund_by_day[day_name] = abbrev_name
+        
+        elif "Pikett" in dienst_type:
+            hintergrund_by_day[day_name] = abbrev_name
+    
+    # Write to Excel
+    # Absences - write to first cell of range
+    for day, names in absences_by_day.items():
+        if names and day in ABW_RANGES:
+            cell_range = ABW_RANGES[day]
+            # Extract first cell from range (e.g., "T94:AC108" → "T94")
+            first_cell = cell_range.split(':')[0]
+            ws[first_cell].value = ", ".join(sorted(set(names)))
+    
+    # Nachtdienst - single cell per day
+    for day, name in nacht_by_day.items():
+        if day in NACHT_RANGES:
+            cell_range = NACHT_RANGES[day]
+            first_cell = cell_range.split(':')[0]
+            ws[first_cell].value = name
+    
+    # Spätdienst
+    for site in ["BH", "LI"]:
+        for day, name in spaet_by_day[site].items():
+            cell = SPAETDIENST_CELLS.get(site, {}).get(day)
+            if cell:
+                ws[cell].value = name
+    
+    # Vordergrunddienst
+    for day, name in vordergrund_by_day.items():
+        cell = VORDERGRUNDDIENST_CELLS.get(day)
+        if cell:
+            ws[cell].value = name
+    
+    # Hintergrunddienst
+    for day, name in hintergrund_by_day.items():
+        cell = HINTERGRUNDDIENST_CELLS.get(day)
+        if cell:
+            ws[cell].value = name
+
+
 if __name__ == "__main__":
     import argparse, os
 
@@ -903,6 +1080,8 @@ if __name__ == "__main__":
                         help=".xlsm source file (e.g. KW 41_leer.xlsm)")
     parser.add_argument("-o", "--output", required=True,
                         help="FINAL .xlsm (after meetings), e.g. KW_41_FINAL.xlsm")
+    parser.add_argument("--csv", dest="csv_file", default=None,
+                        help="CSV file with dienste to import (optional)")
     parser.add_argument("--seed", type=int, default=1234,
                         help="random seed for fair picks (default: 1234)")
     parser.add_argument("-nocleanup", "--no-cleanup", dest="no_cleanup",
@@ -937,6 +1116,12 @@ if __name__ == "__main__":
         if args.keep_intermediate:
             wb.save(cleaned_out)
             patch_xlsm(cleaned_out, args.input)
+
+    # 0.5) Import dienste from CSV (if provided)
+    if args.csv_file:
+        print(f"📥 Importing dienste from CSV: {args.csv_file}")
+        fill_dienste_from_csv(ws, args.csv_file)
+        print("✓ CSV import complete")
 
     # Read absences once (cleanup does not touch absence cells)
     absences = read_absences_by_day(ws)
