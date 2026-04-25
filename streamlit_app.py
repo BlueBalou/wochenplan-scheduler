@@ -178,6 +178,7 @@ st.set_page_config(
     layout="wide",
 )
 st.title("Wochenplan Scheduler — KSBL Radiologie")
+st.caption("by S. Vitéz · Powered by Claude AI")
 
 # Helper functions for meeting pools (used in multiple tabs)
 def load_meeting_pools() -> dict:
@@ -273,55 +274,24 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
     return None
 
 
-tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan", "Personalverwaltung", "Rapporte-Pools", "Layout-Editor"])
+tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan erstellen", "Personalverwaltung", "Rapporte-Pools", "Layout-Editor"])
 
 # ===========================================================================
 # TAB 1 — Wochenplan
 # ===========================================================================
 
 with tab_plan:
-    st.markdown("### 🗂️ Vorlage verwalten")
-    st.caption("Lade eine neue leere Vorlage hoch, um die Standard-Vorlage zu ersetzen.")
-    
-    with st.expander("Neue Vorlage hochladen"):
-        st.info("⚠️ Vorlage muss 'KW_xx_TEMPLATE.xlsm' heissen")
-        
-        new_template = st.file_uploader(
-            "Neue Vorlage hochladen",
-            type=["xlsm"],
-            help="Die neue leere Wochenplan-Vorlage. Muss 'KW_xx_TEMPLATE.xlsm' heissen.",
-            key="new_template_uploader"
-        )
-        
-        if new_template:
-            if new_template.name != "KW_xx_TEMPLATE.xlsm":
-                st.error(f"❌ Dateiname muss 'KW_xx_TEMPLATE.xlsm' sein (aktuell: '{new_template.name}')")
-            else:
-                if st.button("Vorlage ersetzen", type="primary", key="replace_template_btn"):
-                    try:
-                        with open(TEMPLATE_XLSM, "wb") as f:
-                            f.write(new_template.getbuffer())
-                        st.success("✓ Vorlage erfolgreich ersetzt!")
-                    except Exception as e:
-                        st.error(f"Fehler beim Ersetzen: {e}")
-    
-    st.divider()
-    
     # Check if template exists
     template_exists = TEMPLATE_XLSM.exists()
     if not template_exists:
-        st.warning("⚠️ Keine 'KW_xx_TEMPLATE.xlsm' gefunden. Bitte lade eine Vorlage hoch (oben).")
+        st.warning("⚠️ Keine 'KW_xx_TEMPLATE.xlsm' gefunden. Bitte lade eine Vorlage hoch (unten).")
     
-    st.markdown("### Option 1: CSV → Standard-Vorlage → Vollständige Pipeline")
-    st.caption("Lade nur eine CSV-Datei hoch. Die Standard-Vorlage wird automatisch geladen.")
-    
-    if template_exists:
-        st.info("📄 Leere 'KW_xx_TEMPLATE.xlsm' wird ausgefüllt")
+    st.markdown("### CSV ✨ Standard-Vorlage ✨ fertiger Wochenplan")
     
     csv_file_opt1 = st.file_uploader(
         "CSV-Datei hochladen",
         type=["csv"],
-        help="CSV-Datei mit Absenzen und Diensten.",
+        help="Lade nur eine CSV-Datei hoch. Die Standard-Vorlage wird automatisch geladen.",
         key="csv_opt1",
         disabled=not template_exists
     )
@@ -413,8 +383,7 @@ with tab_plan:
     
     st.divider()
     
-    st.markdown("### Option 2: CSV + Eigene Vorlage → Vollständige Pipeline")
-    st.caption("Lade CSV-Datei und eine eigene .xlsm-Vorlage hoch.")
+    st.markdown("### CSV + Eigene Vorlage ✨ fertiger Wochenplan")
     
     csv_file_opt2 = st.file_uploader(
         "CSV-Datei hochladen",
@@ -426,7 +395,7 @@ with tab_plan:
     template_file_opt2 = st.file_uploader(
         "Eigene Wochenplan-Vorlage (.xlsm) hochladen",
         type=["xlsm"],
-        help="Eine eigene leere oder teilweise ausgefüllte Vorlage.",
+        help="Lade CSV-Datei und eine eigene .xlsm-Vorlage hoch.",
         key="template_opt2"
     )
     
@@ -521,6 +490,37 @@ with tab_plan:
                 os.unlink(template_tmp_path)
             if output_tmp_path and os.path.exists(output_tmp_path):
                 os.unlink(output_tmp_path)
+    
+    st.divider()
+    
+    st.markdown("### 🗂️ Vorlage verwalten")
+    st.caption("Lade eine neue leere Vorlage hoch, um die Standard-Vorlage zu ersetzen.")
+    
+    with st.expander("Neue Vorlage hochladen"):
+        st.info("⚠️ Vorlage muss 'KW_xx_TEMPLATE.xlsm' heissen")
+        
+        new_template = st.file_uploader(
+            "Neue Vorlage hochladen",
+            type=["xlsm"],
+            help="Die neue leere Wochenplan-Vorlage. Muss 'KW_xx_TEMPLATE.xlsm' heissen.",
+            key="new_template_uploader"
+        )
+        
+        if new_template:
+            if new_template.name != "KW_xx_TEMPLATE.xlsm":
+                st.error(f"❌ Dateiname muss 'KW_xx_TEMPLATE.xlsm' sein (aktuell: '{new_template.name}')")
+            else:
+                if st.button("Vorlage ersetzen", type="primary", key="replace_template_btn"):
+                    try:
+                        with open(TEMPLATE_XLSM, "wb") as f:
+                            f.write(new_template.getbuffer())
+                        st.success("✓ Vorlage erfolgreich ersetzt!")
+                    except Exception as e:
+                        st.error(f"Fehler beim Ersetzen: {e}")
+
+# ===========================================================================
+# TAB 2 — Personalverwaltung
+# ===========================================================================
 with tab_personal:
     st.subheader("Personalbestand")
 
