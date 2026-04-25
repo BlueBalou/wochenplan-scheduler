@@ -778,7 +778,11 @@ with tab_layout:
                 row: abw_edited.at[row, "Bereich"] for row in abw_edited.index
             },
             "nacht_ranges": {
-                row: nacht_edited.at[row, "Bereich"] for row in nacht_edited.index
+                # Save edited weekdays (Mon-Fri)
+                **{row: nacht_edited.at[row, "Bereich"] for row in nacht_edited.index},
+                # Preserve weekend from current layout
+                "Samstag": current_layout.get("nacht_ranges", {}).get("Samstag", ""),
+                "Sonntag": current_layout.get("nacht_ranges", {}).get("Sonntag", ""),
             },
             "spaetdienst_cells": {
                 site: {day: str(spaet_edited.at[site, day] or "") for day in ALL_WEEKDAYS}
