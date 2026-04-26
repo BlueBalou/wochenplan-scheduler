@@ -30,3 +30,4 @@ venv/
 # Logs and temp files
 *.log
 /tmp/
+*.csv
