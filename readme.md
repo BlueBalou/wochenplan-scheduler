@@ -4,4 +4,5 @@ staff.json
 meeting_pools.json
 layout.json
 bezeichnungen.json
+og_rules.json
 KW_xx_TEMPLATE.xlsm

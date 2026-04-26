@@ -1058,6 +1058,69 @@ with tab_layout:
         st.success("Layout gespeichert und neu geladen.")
         st.rerun()
 
+    # -------------------------------------------------------------------------
+    # Organgruppen-Sonderregeln
+    # -------------------------------------------------------------------------
+    st.divider()
+    with st.expander("Organgruppen-Sonderregeln"):
+        st.caption(
+            "Regelt Zuteilungs- und Warnungsverhalten pro Organgruppe. "
+            "Laufen ist ausgenommen — es hat eine eigene Zuteilungslogik."
+        )
+
+        OG_RULES_PATH = Path(__file__).parent / "og_rules.json"
+
+        def _load_og_rules_ui() -> dict:
+            with open(OG_RULES_PATH, encoding="utf-8") as _f:
+                return json.load(_f)
+
+        og_rules = _load_og_rules_ui()
+        rotation_only = set(og_rules.get("rotation_or_leader_only", []))
+        warn_kein_aa  = set(og_rules.get("warn_kein_aa", []))
+        warn_2fa      = set(og_rules.get("warn_weniger_als_2fa", []))
+        warn_fa_site  = set(og_rules.get("warn_kein_fa_site", []))
+
+        OGS_FOR_RULES = [og for og in sched.OG_LIST if og != "Laufen"]
+
+        # Header row
+        hc0, hc1, hc2, hc3, hc4 = st.columns([2, 1.5, 1.5, 1.8, 1.8])
+        hc0.markdown("**Organgruppe**")
+        hc1.markdown("**Nur Leitende/Rotanden**")
+        hc2.markdown("**Kein AA Warnung**")
+        hc3.markdown("**Weniger als 2 FAs Warnung**")
+        hc4.markdown("**Kein FA pro Standort Warnung**")
+
+        new_rotation_only = set()
+        new_warn_kein_aa  = set()
+        new_warn_2fa      = set()
+        new_warn_fa_site  = set()
+
+        for og in OGS_FOR_RULES:
+            c0, c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1.8, 1.8])
+            c0.markdown(og)
+            if c1.checkbox("", value=(og in rotation_only), key=f"ogr_rot_{og}"):
+                new_rotation_only.add(og)
+            if c2.checkbox("", value=(og in warn_kein_aa), key=f"ogr_aa_{og}"):
+                new_warn_kein_aa.add(og)
+            if c3.checkbox("", value=(og in warn_2fa), key=f"ogr_2fa_{og}"):
+                new_warn_2fa.add(og)
+            if c4.checkbox("", value=(og in warn_fa_site), key=f"ogr_site_{og}"):
+                new_warn_fa_site.add(og)
+
+        if st.button("Sonderregeln speichern", type="primary", key="save_og_rules_btn"):
+            new_rules = {
+                "_comment": og_rules.get("_comment", ""),
+                "rotation_or_leader_only": sorted(new_rotation_only),
+                "warn_kein_aa":            sorted(new_warn_kein_aa),
+                "warn_weniger_als_2fa":    sorted(new_warn_2fa),
+                "warn_kein_fa_site":       sorted(new_warn_fa_site),
+            }
+            with open(OG_RULES_PATH, "w", encoding="utf-8") as _f:
+                json.dump(new_rules, _f, ensure_ascii=False, indent=2)
+            sched.reload_og_rules()
+            st.success("Organgruppen-Sonderregeln gespeichert.")
+            st.rerun()
+
 # ===========================================================================
 # TAB 6 — Rapporte-Pools
 # ===========================================================================

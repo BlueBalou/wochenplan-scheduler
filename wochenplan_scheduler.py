@@ -46,10 +46,20 @@ OG_LIST = [
 ]
 WEEKDAYS = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag"]
 
-# Flags for OGs
-TARGET_OG_FOR_ONE_FA = {"MSK","Neuro","Onko","Thorax","Abdomen"}  # < 2 FA total → WENIGER ALS 2FA
-TARGET_OG_FOR_KEIN_FA_SITE = {"MSK","Abdomen"}                    # KEIN FA IN BH/LI (only if not <2FA flagged)
-OGS_SKIP_KEIN_AA = {"Nuklearmedizin","Laufen", "Mammo"}           # no KEIN AA flag
+# OG special rules — loaded from og_rules.json (edit via Streamlit UI)
+def _load_og_rules():
+    _path = Path(__file__).parent / "og_rules.json"
+    with open(_path, encoding="utf-8") as _f:
+        _r = json.load(_f)
+    return (
+        set(_r.get("rotation_or_leader_only", [])),
+        set(_r.get("warn_kein_aa", [])),
+        set(_r.get("warn_weniger_als_2fa", [])),
+        set(_r.get("warn_kein_fa_site", [])),
+    )
+
+OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
+OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}  # Laufen always skipped
 
 # Non-leader OGs (exclude Laufen)
 OG_LIST_NONLEADER = [og for og in OG_LIST if og != "Laufen"]
@@ -255,6 +265,13 @@ if not os.path.exists(_pools_json):
         "Create it before running the scheduler."
     )
 load_meeting_pools_from_json(_pools_json)
+
+
+def reload_og_rules() -> None:
+    """Reload OG special rules from og_rules.json — call after saving via UI."""
+    global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA
+    OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
+    OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}
 
 
 def _clear_cells(ws: Worksheet, cells: Tuple[str, ...]):
@@ -633,18 +650,15 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             for og in s.rotations:
                 if og in OG_LIST_NONLEADER: _place_in_og(ws,day,og,name,False)
 
-        # 2) no-rotation → lowest FA_COUNTS (skip Laufen)
+        # 2) no-rotation → lowest FA_COUNTS (skip Laufen and rotation_or_leader_only OGs)
         def free_ogs(day):
             """
-            OGs that can receive 'free' assignments (no-rotation FAs/AAs).
-            We explicitly *exclude* 'Mammo' so only:
-              - LA leaders with leads_ogs={'Mammo'}
-              - staff with rotation including 'Mammo'
-            can ever be placed there.
+            OGs that can receive free assignments (no-rotation FAs/AAs).
+            Excludes OGs in OG_ROTATION_OR_LEADER_ONLY (e.g. Mammo, Nuklearmedizin).
             """
             return [
                 og for og in OG_LIST_NONLEADER
-                if og != "Mammo"
+                if og not in OG_ROTATION_OR_LEADER_ONLY
                 and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
                     ]
         for name in [n for n in (oa_bh+oa_li) if n not in abs_today and not staff_by_name[n].rotations]:

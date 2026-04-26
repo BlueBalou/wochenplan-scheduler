@@ -8,6 +8,7 @@ staff.json
 layout.json
 meeting_pools.json
 bezeichnungen.json
+og_rules.json
 
 # Python
 __pycache__/
