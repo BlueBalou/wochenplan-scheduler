@@ -27,6 +27,7 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font
 import random, re, os, zipfile, json, xml.etree.ElementTree as ET
+from pathlib import Path
 
 # ---------------- Constants ----------------
 
@@ -1004,12 +1005,11 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         kw = monday_date.isocalendar()[1]
         ws[DATE_CELLS["kw_number"]].value = f"KW {kw}"
     
-    # Dienst type mapping
-    ABSENZ_TYPES = {
-        "Frei", "Frei-Wunsch", "Kompensation", "Kompensation fix",
-        "Externer Arbeitseinsatz", "Fort- und Weiterbildung ohne Zeitanrechnung",
-        "Ferien", "Flexitag"
-    }
+    # Dienst type mapping — loaded from bezeichnungen.json
+    _bez_path = Path(__file__).parent / "bezeichnungen.json"
+    with open(_bez_path, encoding="utf-8") as _f:
+        _bez = json.load(_f)
+    ABSENZ_TYPES = set(_bez.get("absenz", []))
     
     # Day name mapping (German date to layout key)
     day_names = {

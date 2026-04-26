@@ -191,33 +191,20 @@ def save_meeting_pools(data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Known Bezeichnungen — edit here if new types appear in CSV exports
-# Keep in sync with classify() in csv_to_gcal.py and wochenplan_scheduler.py
+# Known Bezeichnungen — loaded from bezeichnungen.json (single source of truth)
+# Edit bezeichnungen.json to add new types; no changes needed here.
 # ---------------------------------------------------------------------------
-_KNOWN_BEZEICHNUNGEN = {
-    # Absences
-    "Frei", "Frei-Wunsch", "Kompensation", "Kompensation fix",
-    "Externer Arbeitseinsatz", "Fort- und Weiterbildung ohne Zeitanrechnung",
-    "Ferien", "Flexitag",
-    # Nachtdienst
-    "Bh-40_Nachtdienst Mo-Fr (inkl. bez. Ruhezeit 4h)",
-    "Bh-4-W_Nachtdienst Sa/So/FT (inkl. bez. Ruhezeit 4h)",
-    "Li-40_Nachtdienst Mo-Fr (inkl. bez. Ruhezeit 4h)",
-    "Li-4-W_Nachtdienst Sa/So/FT (inkl. bez. Ruhezeit 4h)",
-    # Spätdienst
-    "Bh-30_Spätdienst Mo-Fr", "Li-30_Spätdienst Mo-Fr",
-    # Tagdienst weekday
-    "Bh-10_Tagdienst Mo-Fr", "Li-10_Tagdienst Mo-Fr",
-    "Bh-11_Tagdienst UA/SpAz", "Li-11_Tagdienst UA/SpAz",
-    # Tagdienst weekend
-    "Bh-1-W_Tagdienst Sa/So", "Li-1-W_Tagdienst Sa/So",
-    # Pikett
-    "Bh-P0_Pikett_24h_Sa/So", "Li-P0_Pikett_24h_Sa/So",
-    "Bh-P1_Pikett_Vormittag_Sa/So", "Li-P1_Pikett_Vormittag_Sa/So",
-    "Bh-P5_Pikett_Nacht_Mo-Fr", "Li-P5_Pikett_Nacht_Mo-Fr",
-    "Bh-P12_EIR Mo-Fr", "Li-P12_EIR Mo-Fr",
-    "Bh-P14_EIR 24h Sa/So", "Li-P14_EIR 24h Sa/So",
-}
+def _load_known_bezeichnungen() -> set:
+    _path = Path(__file__).parent / "bezeichnungen.json"
+    with open(_path, encoding="utf-8") as _f:
+        _bez = json.load(_f)
+    known = set()
+    for key, values in _bez.items():
+        if not key.startswith("_"):
+            known.update(values)
+    return known
+
+_KNOWN_BEZEICHNUNGEN = _load_known_bezeichnungen()
 
 
 def _check_unknown_bezeichnungen(csv_path: str) -> list[str]:
@@ -387,7 +374,7 @@ with tab_template:
                     st.warning(
                         "⚠️ **Unbekannte Bezeichnung(en) im CSV** — betroffene Personen werden als anwesend behandelt:\n\n"
                         + "\n".join(f"- `{b}`" for b in unknown_bez)
-                        + "\n\nBitte `_KNOWN_BEZEICHNUNGEN` in `streamlit_app.py` ergänzen falls nötig."
+                        + "\n\nBitte `bezeichnungen.json` ergänzen falls nötig."
                     )
                 sched.fill_dienste_from_csv(ws, csv_tmp_path)
                 
@@ -532,7 +519,7 @@ with tab_eigene:
                     st.warning(
                         "⚠️ **Unbekannte Bezeichnung(en) im CSV** — betroffene Personen werden als anwesend behandelt:\n\n"
                         + "\n".join(f"- `{b}`" for b in unknown_bez)
-                        + "\n\nBitte `_KNOWN_BEZEICHNUNGEN` in `streamlit_app.py` ergänzen falls nötig."
+                        + "\n\nBitte `bezeichnungen.json` ergänzen falls nötig."
                     )
                 sched.fill_dienste_from_csv(ws, csv_tmp_path)
                 
