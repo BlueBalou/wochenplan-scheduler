@@ -751,12 +751,12 @@ def _delete_rapport(key: str) -> None:
     save_layout(layout)
 
 
-def _add_rapport(key: str) -> None:
+def _add_rapport(key: str, exclude_laufen: bool = False) -> None:
     """Add a new rapport to both layout.json and meeting_pools.json with empty defaults."""
     pools_data = load_meeting_pools()
     pools_data[key] = {
         "site": key.split("|", 1)[0],
-        "pools": [{"type": "names", "names": [], "site": key.split("|", 1)[0]}],
+        "pools": [{"type": "names", "names": [], "site": key.split("|", 1)[0], "exclude_laufen": exclude_laufen}],
         "fallback_text": "FÄLLT AUS",
         "roter_fallback_text": True,
     }
@@ -835,7 +835,7 @@ with tab_rapporte:
                 st.warning(f"'{new_r_key}' existiert bereits.")
             else:
                 try:
-                    _add_rapport(new_r_key)
+                    _add_rapport(new_r_key, exclude_laufen=st.session_state.get("global_exclude_laufen", False))
                     st.success(f"'{new_r_key}' wurde hinzugefügt. Zellen im Layout-Editor eintragen.")
                     st.rerun()
                 except Exception as e:
