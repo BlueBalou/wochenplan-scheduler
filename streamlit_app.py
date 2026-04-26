@@ -273,7 +273,7 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
     return None
 
 
-tab_template, tab_eigene, tab_Feiertage, tab_personal, tab_pools, tab_laufen, tab_layout = st.tabs(["Wochenplan mit Standard-Vorlage", "Wochenplan mit eigener Vorlage", "Feiertage", "Personalverwaltung", "Rapporte-Pools", "Radiologe in Laufen", "Layout-Editor"])
+tab_template, tab_eigene, tab_Feiertage, tab_personal, tab_pools, tab_laufen, tab_rapporte, tab_layout = st.tabs(["Wochenplan mit Standard-Vorlage", "Wochenplan mit eigener Vorlage", "Feiertage", "Personalverwaltung", "Rapporte-Pools", "Radiologe in Laufen", "Rapporte verwalten", "Layout-Editor"])
 
 # ===========================================================================
 # TAB 1 — Wochenplan mit Standard-Vorlage
@@ -697,6 +697,151 @@ _COL_CFG = {
     for day in ALL_WEEKDAYS
 }
 
+
+
+# ===========================================================================
+# TAB 7 — Rapporte verwalten
+# ===========================================================================
+
+def _rapport_overview_df() -> pd.DataFrame:
+    """Overview table of all rapporte from meeting_pools.json."""
+    pools_data = load_meeting_pools()
+    rows = []
+    for key in pools_data:
+        parts = key.split("|", 1)
+        site = parts[0] if len(parts) == 2 else "?"
+        name = parts[1] if len(parts) == 2 else key
+        rows.append({"Key": key, "Name": name, "Standort": site})
+    return pd.DataFrame(rows)
+
+
+def _rename_rapport(old_key: str, new_key: str) -> None:
+    """Rename a rapport key atomically in both layout.json and meeting_pools.json."""
+    # --- meeting_pools.json ---
+    pools_data = load_meeting_pools()
+    if old_key not in pools_data:
+        raise KeyError(f"Rapport '{old_key}' nicht in meeting_pools.json gefunden.")
+    cfg = pools_data.pop(old_key)
+    pools_data[new_key] = cfg
+    save_meeting_pools(pools_data)
+
+    # --- layout.json ---
+    layout = load_layout()
+    old_parts = old_key.split("|", 1)
+    new_parts = new_key.split("|", 1)
+    old_site, old_name = old_parts[0], old_parts[1]
+    new_site, new_name = new_parts[0], new_parts[1]
+
+    # Move cell mappings: remove from old site/name, insert under new site/name
+    old_cells = layout["meeting_cells"].get(old_site, {}).pop(old_name, {})
+    layout["meeting_cells"].setdefault(new_site, {})[new_name] = old_cells
+    save_layout(layout)
+
+
+def _delete_rapport(key: str) -> None:
+    """Delete a rapport from both layout.json and meeting_pools.json."""
+    pools_data = load_meeting_pools()
+    pools_data.pop(key, None)
+    save_meeting_pools(pools_data)
+
+    layout = load_layout()
+    parts = key.split("|", 1)
+    if len(parts) == 2:
+        layout["meeting_cells"].get(parts[0], {}).pop(parts[1], None)
+    save_layout(layout)
+
+
+def _add_rapport(key: str) -> None:
+    """Add a new rapport to both layout.json and meeting_pools.json with empty defaults."""
+    pools_data = load_meeting_pools()
+    pools_data[key] = {
+        "site": key.split("|", 1)[0],
+        "pools": [{"type": "names", "names": [], "site": key.split("|", 1)[0]}],
+        "fallback_text": "FÄLLT AUS",
+        "roter_fallback_text": True,
+    }
+    save_meeting_pools(pools_data)
+
+    layout = load_layout()
+    parts = key.split("|", 1)
+    site, name = parts[0], parts[1]
+    layout["meeting_cells"].setdefault(site, {}).setdefault(name, {
+        day: [] for day in ALL_WEEKDAYS
+    })
+    save_layout(layout)
+
+
+with tab_rapporte:
+    st.subheader("Rapporte verwalten")
+    st.caption("Rapporte hinzufügen, umbenennen oder löschen. Zellen werden im Layout-Editor bearbeitet.")
+
+    # Overview table
+    rapport_df = _rapport_overview_df()
+    st.dataframe(rapport_df[["Name", "Standort"]], use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ---- Edit existing rapport ----
+    st.subheader("Rapport bearbeiten")
+    all_rapport_keys = rapport_df["Key"].tolist() if not rapport_df.empty else []
+    edit_rapport_key = st.selectbox("Rapport auswählen", all_rapport_keys, key="edit_rapport_select")
+
+    if edit_rapport_key:
+        r_parts = edit_rapport_key.split("|", 1)
+        r_site_current = r_parts[0]
+        r_name_current = r_parts[1] if len(r_parts) == 2 else edit_rapport_key
+
+        rc1, rc2 = st.columns(2)
+        r_name_new = rc1.text_input("Name", value=r_name_current, key="edit_rapport_name")
+        r_site_new = rc2.selectbox("Standort", ["BH", "LI"],
+                                   index=["BH", "LI"].index(r_site_current) if r_site_current in ["BH", "LI"] else 0,
+                                   key="edit_rapport_site")
+
+        if st.button("Änderungen speichern", type="primary", key="save_rapport_btn"):
+            new_key = f"{r_site_new}|{r_name_new.strip()}"
+            if not r_name_new.strip():
+                st.warning("Name darf nicht leer sein.")
+            elif new_key != edit_rapport_key and new_key in all_rapport_keys:
+                st.warning(f"'{new_key}' existiert bereits.")
+            else:
+                try:
+                    _rename_rapport(edit_rapport_key, new_key)
+                    st.success(f"Rapport umbenannt zu '{new_key}'.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fehler: {e}")
+
+        if st.button("Rapport löschen", key="delete_rapport_btn"):
+            try:
+                _delete_rapport(edit_rapport_key)
+                st.success(f"'{edit_rapport_key}' wurde gelöscht.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Fehler: {e}")
+
+    st.divider()
+
+    # ---- Add new rapport ----
+    with st.expander("Neuen Rapport hinzufügen"):
+        nc1, nc2 = st.columns(2)
+        new_r_name = nc1.text_input("Name", placeholder="z.B. Medizin (07:45-08:00)", key="new_rapport_name")
+        new_r_site = nc2.selectbox("Standort", ["BH", "LI"], key="new_rapport_site")
+
+        if st.button("Rapport hinzufügen", type="primary", key="add_rapport_btn"):
+            new_r_key = f"{new_r_site}|{new_r_name.strip()}"
+            if not new_r_name.strip():
+                st.warning("Name darf nicht leer sein.")
+            elif new_r_key in all_rapport_keys:
+                st.warning(f"'{new_r_key}' existiert bereits.")
+            else:
+                try:
+                    _add_rapport(new_r_key)
+                    st.success(f"'{new_r_key}' wurde hinzugefügt. Zellen im Layout-Editor eintragen.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fehler: {e}")
+
+
 with tab_layout:
     st.subheader("Layout-Editor")
     st.caption(
@@ -948,10 +1093,8 @@ with tab_pools:
 
     pools_data = load_meeting_pools()
 
-    import re as _re
     for meeting_key, cfg in pools_data.items():
-        display_key = _re.sub(r"\s*\([\d:–\-]+\)", "", meeting_key).strip()
-        with st.expander(display_key):
+        with st.expander(meeting_key):
             prefix = meeting_key.replace("|", "_").replace(" ", "_").replace(":", "").replace("/", "_").replace("(", "").replace(")", "")
 
             pools = cfg.get("pools", [])
