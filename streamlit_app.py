@@ -117,6 +117,12 @@ def _init_session_state() -> None:
 
 _init_session_state()
 
+st.set_page_config(
+    page_title="Wochenplan Scheduler",
+    page_icon="📋",
+    layout="wide",
+)
+
 # ---------------------------------------------------------------------------
 # Password gate
 # ---------------------------------------------------------------------------
@@ -170,13 +176,6 @@ def _check_password() -> bool:
 if not _check_password():
     st.stop()
 
-
-
-st.set_page_config(
-    page_title="Wochenplan Scheduler",
-    page_icon="📋",
-    layout="wide",
-)
 st.title("Wochenplan Scheduler — KSBL Radiologie")
 st.caption("by S. Vitéz · Powered by Anthropic")
 
@@ -274,13 +273,13 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
     return None
 
 
-tab_plan, tab_personal, tab_pools, tab_layout = st.tabs(["Wochenplan erstellen", "Personalverwaltung", "Rapporte-Pools", "Layout-Editor"])
+tab_template, tab_eigene, tab_Feiertage, tab_personal, tab_pools, tab_laufen, tab_layout = st.tabs(["Wochenplan mit Standard-Vorlage", "Wochenplan mit eigener Vorlage", "Feiertage", "Personalverwaltung", "Rapporte-Pools", "Radiologe in Laufen", "Layout-Editor"])
 
 # ===========================================================================
-# TAB 1 — Wochenplan
+# TAB 1 — Wochenplan mit Standard-Vorlage
 # ===========================================================================
 
-with tab_plan:
+with tab_template:
     # Check if template exists
     template_exists = TEMPLATE_XLSM.exists()
     if not template_exists:
@@ -381,8 +380,38 @@ with tab_plan:
             if output_tmp_path and os.path.exists(output_tmp_path):
                 os.unlink(output_tmp_path)
     
+
     st.divider()
     
+    st.markdown("### 🗂️ Vorlage verwalten")
+    st.caption("Lade eine neue leere Vorlage hoch, um die Standard-Vorlage zu ersetzen.")
+    
+    with st.expander("Neue Vorlage hochladen"):
+        
+        new_template = st.file_uploader(
+            "Neue Vorlage hochladen",
+            type=["xlsm"],
+            help="Die neue leere Wochenplan-Vorlage. Wird automatisch als 'KW_xx_TEMPLATE.xlsm' gespeichert.",
+            key="new_template_uploader"
+        )
+        
+        if new_template:
+            if st.button("Vorlage ersetzen", type="primary", key="replace_template_btn"):
+                try:
+                    with open(TEMPLATE_XLSM, "wb") as f:
+                        f.write(new_template.getbuffer())
+                    st.success(f"✓ '{new_template.name}' wurde als 'KW_xx_TEMPLATE.xlsm' gespeichert!")
+                except Exception as e:
+                    st.error(f"Fehler beim Ersetzen: {e}")
+
+    
+    
+# ===========================================================================
+# TAB 2 — Wochenplan mit eigener Vorlage
+# ===========================================================================
+ 
+with tab_eigene:
+
     st.markdown("### 📤 CSV + 📤 Eigene Vorlage 🪄→ fertiger Wochenplan")
     
     csv_file_opt2 = st.file_uploader(
@@ -490,9 +519,12 @@ with tab_plan:
                 os.unlink(template_tmp_path)
             if output_tmp_path and os.path.exists(output_tmp_path):
                 os.unlink(output_tmp_path)
-    
-    st.divider()
-    
+
+# ===========================================================================
+# TAB 3 — Feiertage
+# ===========================================================================
+with tab_Feiertage:
+
     st.markdown("### 🎉 Feiertage")
     st.caption("Wähle Wochentage, die als Feiertage behandelt werden sollen (keine Absenzen, OG, FR, Rapporte).")
     
@@ -513,32 +545,9 @@ with tab_plan:
         save_layout(layout)
         st.success(f"✓ Feiertage gespeichert: {', '.join(feiertage_selected) if feiertage_selected else 'Keine'}")
         st.rerun()
-    
-    st.divider()
-    
-    st.markdown("### 🗂️ Vorlage verwalten")
-    st.caption("Lade eine neue leere Vorlage hoch, um die Standard-Vorlage zu ersetzen.")
-    
-    with st.expander("Neue Vorlage hochladen"):
-        
-        new_template = st.file_uploader(
-            "Neue Vorlage hochladen",
-            type=["xlsm"],
-            help="Die neue leere Wochenplan-Vorlage. Wird automatisch als 'KW_xx_TEMPLATE.xlsm' gespeichert.",
-            key="new_template_uploader"
-        )
-        
-        if new_template:
-            if st.button("Vorlage ersetzen", type="primary", key="replace_template_btn"):
-                try:
-                    with open(TEMPLATE_XLSM, "wb") as f:
-                        f.write(new_template.getbuffer())
-                    st.success(f"✓ '{new_template.name}' wurde als 'KW_xx_TEMPLATE.xlsm' gespeichert!")
-                except Exception as e:
-                    st.error(f"Fehler beim Ersetzen: {e}")
 
 # ===========================================================================
-# TAB 2 — Personalverwaltung
+# TAB 4 — Personalverwaltung
 # ===========================================================================
 with tab_personal:
     st.subheader("Personalbestand")
@@ -680,7 +689,7 @@ with tab_personal:
                 st.rerun()
 
 # ===========================================================================
-# TAB 3 — Layout-Editor
+# TAB 5 — Layout-Editor
 # ===========================================================================
 
 _COL_CFG = {
@@ -861,7 +870,7 @@ with tab_layout:
         st.rerun()
 
 # ===========================================================================
-# TAB 4 — Rapporte-Pools
+# TAB 6 — Rapporte-Pools
 # ===========================================================================
 
 # Pool type options with display labels
@@ -935,34 +944,27 @@ with tab_pools:
         "Die Pools werden in der definierten Reihenfolge durchlaufen, bis eine "
         "verfügbare Person gefunden wird."
     )
-    
-    # Laufen configuration
-    laufen_days = st.multiselect(
-        "Radiologe in Laufen anwesend",
-        options=ALL_WEEKDAYS,
-        default=list(sched.LAUFEN_DAYS),
-        help="Wochentage, an denen 'Laufen' besetzt wird (OG-Leader Neuro/Laufen).",
-        key="laufen_days_select"
-    )
-    # Store in session state for use in tab_plan
-    st.session_state["laufen_days"] = laufen_days
-    
-    st.divider()
+    st.markdown("**Pools** (in Prioritätsreihenfolge)")
 
     pools_data = load_meeting_pools()
 
+    import re as _re
     for meeting_key, cfg in pools_data.items():
-        with st.expander(meeting_key):
+        display_key = _re.sub(r"\s*\([\d:–\-]+\)", "", meeting_key).strip()
+        with st.expander(display_key):
             prefix = meeting_key.replace("|", "_").replace(" ", "_").replace(":", "").replace("/", "_").replace("(", "").replace(")", "")
 
-            st.markdown("**Pools** (in Prioritätsreihenfolge)")
             pools = cfg.get("pools", [])
 
             # Get all staff names for dropdowns
             all_staff_names = sorted(sched.staff_by_name.keys())
 
             for i, pool in enumerate(pools):
-                st.markdown(f"---\n**Pool {i+1}**")
+                st.markdown(
+                    f"<span style='font-size:1.05rem; font-weight:700; color:#4A90D9;'>Pool {i+1}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("---")
                 pc1, pc2, pc3 = st.columns(3)
 
                 # Typ dropdown with display labels
@@ -984,7 +986,7 @@ with tab_pools:
                 )
                 pool["site"] = pool_site
 
-                # Roter Text checkbox instead of Stil dropdown
+                # Roter Text checkbox
                 roter_text = pc3.checkbox(
                     "Roter Text",
                     value=(pool.get("style") == "red_bold"),
@@ -1016,17 +1018,8 @@ with tab_pools:
                     pool_group = _GROUP_OPTIONS[_GROUP_DISPLAY.index(pool_group_display)]
                     pool["group"] = pool_group
 
-                # Exclusion options
-                pc4, pc5 = st.columns(2)
-                excl_laufen = pc4.checkbox(
-                    "Laufen ausschließen",
-                    value=pool.get("exclude_laufen", False),
-                    key=f"{prefix}_p{i}_excl_laufen",
-                )
-                pool["exclude_laufen"] = excl_laufen
-
-                # Spätdienst checkbox
-                excl_spaet = pc5.checkbox(
+                # Spätdienst checkbox (single column now, Laufen moved to global)
+                excl_spaet = st.checkbox(
                     "Spätdienst ausschließen",
                     value=bool(pool.get("exclude_spaetdienst")),
                     key=f"{prefix}_p{i}_excl_spaet",
@@ -1034,7 +1027,7 @@ with tab_pools:
                 )
                 pool["exclude_spaetdienst"] = pool_site if excl_spaet else None
 
-                # Ausgeschlossene Personen - multiselect dropdown
+                # Ausgeschlossene Personen
                 current_excluded = pool.get("exclude_names") or []
                 excluded_names = st.multiselect(
                     "Ausgeschlossene Personen",
@@ -1067,12 +1060,18 @@ with tab_pools:
                         st.rerun()
 
             if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
-                pools.append({"type": "names", "names": [], "site": cfg.get("site", "BH")})
+                exclude_laufen_global = st.session_state.get("global_exclude_laufen", False)
+                pools.append({
+                    "type": "names",
+                    "names": [],
+                    "site": cfg.get("site", "BH"),
+                    "exclude_laufen": exclude_laufen_global,
+                })
                 cfg["pools"] = pools
                 save_meeting_pools(pools_data)
                 st.rerun()
 
-            # Move fallback fields to bottom
+            # Fallback fields
             st.markdown("---")
             st.markdown("**Fallback-Einstellungen**")
             c1, c2 = st.columns(2)
@@ -1108,9 +1107,54 @@ with tab_pools:
                 for pool in cfg.get("pools", []):
                     for k in list(pool.keys()):
                         if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
-                            if k not in ("type", "names", "group", "site"):
+                            if k not in ("type", "names", "group", "site", "exclude_laufen"):
                                 del pool[k]
             save_meeting_pools(pools_data)
             st.success("Rapporte-Pools gespeichert und neu geladen.")
             st.rerun()
+
+
+# ===========================================================================
+# TAB 6 — Radiologe in Laufen
+# ===========================================================================
+
+with tab_laufen:
+    st.subheader("Radiologe in Laufen")
+    st.caption("Konfiguration für den Standort Laufen.")
+
+    laufen_days = st.multiselect(
+        "Radiologe in Laufen anwesend",
+        options=ALL_WEEKDAYS,
+        default=list(sched.LAUFEN_DAYS),
+        help="Wochentage, an denen 'Laufen' besetzt wird (OG-Leader Neuro/Laufen).",
+        key="laufen_days_select"
+    )
+    st.session_state["laufen_days"] = laufen_days
+
+    # Derive current global exclude_laufen from first pool of first rapport
+    _pools_data_laufen = load_meeting_pools()
+    _first_cfg = next(iter(_pools_data_laufen.values()), {})
+    _first_pool = (_first_cfg.get("pools") or [{}])[0]
+    _current_excl = _first_pool.get("exclude_laufen", False)
+
+    global_exclude_laufen = st.checkbox(
+        "Laufen von allen Rapporte-Pools ausschließen",
+        value=st.session_state.get("global_exclude_laufen", _current_excl),
+        help="Schließt den Radiologen in Laufen von der Zuteilung in allen Rapport-Pools aus.",
+        key="global_exclude_laufen",
+    )
+
+    if st.button("Laufen-Einstellungen speichern", type="primary", key="save_laufen_btn"):
+        # Update LAUFEN_DAYS
+        sched.LAUFEN_DAYS.clear()
+        sched.LAUFEN_DAYS.update(laufen_days)
+        # Apply exclude_laufen to all pools in all rapporte
+        _pools_data_laufen = load_meeting_pools()
+        for _cfg in _pools_data_laufen.values():
+            for _pool in _cfg.get("pools", []):
+                _pool["exclude_laufen"] = global_exclude_laufen
+        save_meeting_pools(_pools_data_laufen)
+        st.success("Laufen-Einstellungen gespeichert und auf alle Pools angewendet.")
+        st.rerun()
+
 
