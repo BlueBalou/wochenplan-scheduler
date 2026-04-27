@@ -1103,7 +1103,7 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     
     # Write date to T20 (if date_cells exist in layout)
     if DATE_CELLS and "first_monday" in DATE_CELLS:
-        ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%d.%m.%Y')
+        ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%d/%m/%Y')
     
     # Calculate and write KW (ISO week number)
     if DATE_CELLS and "kw_number" in DATE_CELLS:
