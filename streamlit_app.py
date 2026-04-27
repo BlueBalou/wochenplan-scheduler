@@ -189,6 +189,19 @@ def save_meeting_pools(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
     sched.load_meeting_pools_from_json(str(MEETING_POOLS_JSON))
 
+# Helper functions for og_rules (used in Organgruppen tab)
+def load_og_rules() -> dict:
+    og_rules_path = Path(__file__).parent / "og_rules.json"
+    with open(og_rules_path, encoding="utf-8") as f:
+        return json.load(f)
+
+def save_og_rules(data: dict) -> None:
+    og_rules_path = Path(__file__).parent / "og_rules.json"
+    with open(og_rules_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    # Reload in scheduler module
+    sched.OG_ROTATION_OR_LEADER_ONLY, sched.OG_WARN_KEIN_AA, sched.TARGET_OG_FOR_ONE_FA, sched.TARGET_OG_FOR_KEIN_FA_SITE = sched._load_og_rules()
+
 
 # ---------------------------------------------------------------------------
 # Known Bezeichnungen — loaded from bezeichnungen.json (single source of truth)
@@ -303,7 +316,7 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
     return None
 
 
-tab_template, tab_eigene, tab_Feiertage, tab_personal, tab_pools, tab_laufen, tab_rapporte, tab_layout = st.tabs(["Wochenplan mit Standard-Vorlage", "Wochenplan mit eigener Vorlage", "Feiertage", "Personalverwaltung", "Rapporte-Pools", "Radiologe in Laufen", "Rapporte verwalten", "Layout-Editor"])
+tab_template, tab_eigene, tab_Feiertage, tab_personal, tab_pools, tab_organgruppen, tab_laufen, tab_rapporte, tab_layout = st.tabs(["Wochenplan mit Standard-Vorlage", "Wochenplan mit eigener Vorlage", "Feiertage", "Personalverwaltung", "Rapporte-Pools", "Organgruppen", "Radiologe in Laufen", "Rapporte verwalten", "Layout-Editor"])
 
 # ===========================================================================
 # TAB 1 — Wochenplan mit Standard-Vorlage
@@ -1058,69 +1071,6 @@ with tab_layout:
         st.success("Layout gespeichert und neu geladen.")
         st.rerun()
 
-    # -------------------------------------------------------------------------
-    # Organgruppen-Sonderregeln
-    # -------------------------------------------------------------------------
-    st.divider()
-    with st.expander("Organgruppen-Sonderregeln"):
-        st.caption(
-            "Regelt Zuteilungs- und Warnungsverhalten pro Organgruppe. "
-            "Laufen ist ausgenommen — es hat eine eigene Zuteilungslogik."
-        )
-
-        OG_RULES_PATH = Path(__file__).parent / "og_rules.json"
-
-        def _load_og_rules_ui() -> dict:
-            with open(OG_RULES_PATH, encoding="utf-8") as _f:
-                return json.load(_f)
-
-        og_rules = _load_og_rules_ui()
-        rotation_only = set(og_rules.get("rotation_or_leader_only", []))
-        warn_kein_aa  = set(og_rules.get("warn_kein_aa", []))
-        warn_2fa      = set(og_rules.get("warn_weniger_als_2fa", []))
-        warn_fa_site  = set(og_rules.get("warn_kein_fa_site", []))
-
-        OGS_FOR_RULES = [og for og in sched.OG_LIST if og != "Laufen"]
-
-        # Header row
-        hc0, hc1, hc2, hc3, hc4 = st.columns([2, 1.5, 1.5, 1.8, 1.8])
-        hc0.markdown("**Organgruppe**")
-        hc1.markdown("**Nur Leitende/Rotanden**")
-        hc2.markdown("**Kein AA Warnung**")
-        hc3.markdown("**Weniger als 2 FAs Warnung**")
-        hc4.markdown("**Kein FA pro Standort Warnung**")
-
-        new_rotation_only = set()
-        new_warn_kein_aa  = set()
-        new_warn_2fa      = set()
-        new_warn_fa_site  = set()
-
-        for og in OGS_FOR_RULES:
-            c0, c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1.8, 1.8])
-            c0.markdown(og)
-            if c1.checkbox("", value=(og in rotation_only), key=f"ogr_rot_{og}"):
-                new_rotation_only.add(og)
-            if c2.checkbox("", value=(og in warn_kein_aa), key=f"ogr_aa_{og}"):
-                new_warn_kein_aa.add(og)
-            if c3.checkbox("", value=(og in warn_2fa), key=f"ogr_2fa_{og}"):
-                new_warn_2fa.add(og)
-            if c4.checkbox("", value=(og in warn_fa_site), key=f"ogr_site_{og}"):
-                new_warn_fa_site.add(og)
-
-        if st.button("Sonderregeln speichern", type="primary", key="save_og_rules_btn"):
-            new_rules = {
-                "_comment": og_rules.get("_comment", ""),
-                "rotation_or_leader_only": sorted(new_rotation_only),
-                "warn_kein_aa":            sorted(new_warn_kein_aa),
-                "warn_weniger_als_2fa":    sorted(new_warn_2fa),
-                "warn_kein_fa_site":       sorted(new_warn_fa_site),
-            }
-            with open(OG_RULES_PATH, "w", encoding="utf-8") as _f:
-                json.dump(new_rules, _f, ensure_ascii=False, indent=2)
-            sched.reload_og_rules()
-            st.success("Organgruppen-Sonderregeln gespeichert.")
-            st.rerun()
-
 # ===========================================================================
 # TAB 6 — Rapporte-Pools
 # ===========================================================================
@@ -1362,6 +1312,119 @@ with tab_pools:
             save_meeting_pools(pools_data)
             st.success("Rapporte-Pools gespeichert und neu geladen.")
             st.rerun()
+
+
+# ===========================================================================
+# TAB 5.5 — Organgruppen
+# ===========================================================================
+
+with tab_organgruppen:
+    st.subheader("Organgruppen-Verwaltung")
+    st.caption("Konfiguration für Organgruppen-Zuteilung und Sonderregeln")
+    
+    og_rules = load_og_rules()
+    
+    # Section 1: Priority Order
+    st.markdown("### Organgruppen-Priorität")
+    st.caption("Reihenfolge bei gleicher Auslastung (oben = höchste Priorität). Diese Reihenfolge gilt nur wenn 'Zufällige Zuteilung' deaktiviert ist.")
+    
+    current_order = og_rules.get("og_priority_order", OG_LIST_NO_LAUFEN)
+    
+    # Ensure all OGs are in the list
+    for og in OG_LIST_NO_LAUFEN:
+        if og not in current_order:
+            current_order.append(og)
+    
+    # Display with move buttons
+    changed = False
+    for i, og in enumerate(current_order):
+        col1, col2, col3 = st.columns([6, 1, 1])
+        col1.write(f"**{i+1}.** {og}")
+        
+        if i > 0:
+            if col2.button("↑", key=f"og_up_{i}"):
+                current_order[i], current_order[i-1] = current_order[i-1], current_order[i]
+                og_rules["og_priority_order"] = current_order
+                save_og_rules(og_rules)
+                st.rerun()
+        
+        if i < len(current_order) - 1:
+            if col3.button("↓", key=f"og_down_{i}"):
+                current_order[i], current_order[i+1] = current_order[i+1], current_order[i]
+                og_rules["og_priority_order"] = current_order
+                save_og_rules(og_rules)
+                st.rerun()
+    
+    use_random = st.checkbox(
+        "Zufällige Zuteilung bei gleicher Auslastung",
+        value=og_rules.get("use_random_og_selection", False),
+        help="Wenn aktiviert, wird bei gleicher Auslastung mehrerer OGs zufällig gewählt. Wenn deaktiviert, wird die obige Prioritäts-Reihenfolge verwendet."
+    )
+    
+    if st.button("Priorität speichern", type="primary", key="save_og_priority"):
+        og_rules["use_random_og_selection"] = use_random
+        save_og_rules(og_rules)
+        st.success("Organgruppen-Priorität gespeichert!")
+        st.rerun()
+    
+    st.divider()
+    
+    # Section 2: Special Rules (moved from Layout Editor)
+    st.markdown("### Organgruppen-Sonderregeln")
+    st.caption("Regeln für automatische Warnungen und spezielle Zuweisungen")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Nur Rotation/Leader**")
+        st.caption("OGs die nur an Personen mit Rotation oder Leader zugeteilt werden")
+        rotation_only = st.multiselect(
+            "Organgruppen",
+            options=OG_LIST_NO_LAUFEN,
+            default=sorted(og_rules.get("rotation_or_leader_only", [])),
+            key="rotation_only_select",
+            label_visibility="collapsed"
+        )
+        
+        st.markdown("**WENIGER ALS 2FA Warnung**")
+        st.caption("OGs die 'WENIGER ALS 2FA' anzeigen wenn < 2 Fachärzte")
+        warn_2fa = st.multiselect(
+            "Organgruppen",
+            options=OG_LIST_NO_LAUFEN,
+            default=sorted(og_rules.get("warn_weniger_als_2fa", [])),
+            key="warn_2fa_select",
+            label_visibility="collapsed"
+        )
+    
+    with col2:
+        st.markdown("**KEIN AA Warnung**")
+        st.caption("OGs die 'KEIN AA' anzeigen wenn kein Assistenzarzt zugeteilt")
+        warn_aa = st.multiselect(
+            "Organgruppen",
+            options=OG_LIST_NO_LAUFEN,
+            default=sorted(og_rules.get("warn_kein_aa", [])),
+            key="warn_aa_select",
+            label_visibility="collapsed"
+        )
+        
+        st.markdown("**KEIN FA IN SITE Warnung**")
+        st.caption("OGs die 'KEIN FA IN BH/LI' anzeigen wenn keine FAs vom jeweiligen Standort")
+        warn_site = st.multiselect(
+            "Organgruppen",
+            options=OG_LIST_NO_LAUFEN,
+            default=sorted(og_rules.get("warn_kein_fa_site", [])),
+            key="warn_site_select",
+            label_visibility="collapsed"
+        )
+    
+    if st.button("Sonderregeln speichern", type="primary", key="save_og_rules"):
+        og_rules["rotation_or_leader_only"] = rotation_only
+        og_rules["warn_kein_aa"] = warn_aa
+        og_rules["warn_weniger_als_2fa"] = warn_2fa
+        og_rules["warn_kein_fa_site"] = warn_site
+        save_og_rules(og_rules)
+        st.success("Organgruppen-Sonderregeln gespeichert!")
+        st.rerun()
 
 
 # ===========================================================================

@@ -51,6 +51,11 @@ def _load_og_rules():
     _path = Path(__file__).parent / "og_rules.json"
     with open(_path, encoding="utf-8") as _f:
         _r = json.load(_f)
+    
+    global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION
+    OG_PRIORITY_ORDER = _r.get("og_priority_order", OG_LIST)
+    USE_RANDOM_OG_SELECTION = _r.get("use_random_og_selection", False)
+    
     return (
         set(_r.get("rotation_or_leader_only", [])),
         set(_r.get("warn_kein_aa", [])),
@@ -58,6 +63,8 @@ def _load_og_rules():
         set(_r.get("warn_kein_fa_site", [])),
     )
 
+OG_PRIORITY_ORDER: List[str] = []
+USE_RANDOM_OG_SELECTION: bool = False
 OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
 OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}  # Laufen always skipped
 
@@ -81,7 +88,13 @@ class Staff:
     covers_for: Optional[str] = None                        # name of the person this staff member stands in for
 
     # Counters
-    meetings_count: int = 0
+    meetings_count: int = 0  # Deprecated - kept for backwards compatibility
+    meetings_count_week: int = 0
+    meetings_count_montag: int = 0
+    meetings_count_dienstag: int = 0
+    meetings_count_mittwoch: int = 0
+    meetings_count_donnerstag: int = 0
+    meetings_count_freitag: int = 0
     fr_shifts_count: int = 0
     og_nonleader_count: int = 0
     aa_og_count: int = 0
@@ -408,6 +421,12 @@ def reset_all_counters():
     # Per-person counters
     for s in staff_by_name.values():
         s.meetings_count = 0
+        s.meetings_count_week = 0
+        s.meetings_count_montag = 0
+        s.meetings_count_dienstag = 0
+        s.meetings_count_mittwoch = 0
+        s.meetings_count_donnerstag = 0
+        s.meetings_count_freitag = 0
         s.fr_shifts_count = 0
         s.og_nonleader_count = 0
         s.aa_og_count = 0
@@ -664,14 +683,34 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
         for name in [n for n in (oa_bh+oa_li) if n not in abs_today and not staff_by_name[n].rotations]:
             opts = free_ogs(day); 
             if not opts: continue
-            minv = min(FA_COUNTS[day][og] for og in opts); bucket=[og for og in opts if FA_COUNTS[day][og]==minv]
-            og = rng.choice(bucket); _place_in_og(ws,day,og,name,True)
+            minv = min(FA_COUNTS[day][og] for og in opts)
+            bucket = [og for og in opts if FA_COUNTS[day][og] == minv]
+            
+            # Choose OG based on priority order or random
+            if USE_RANDOM_OG_SELECTION:
+                og = rng.choice(bucket)
+            else:
+                # Sort by priority order, take first
+                bucket_sorted = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)
+                og = bucket_sorted[0]
+            
+            _place_in_og(ws, day, og, name, True)
 
         for name in [n for n in (aa_bh+aa_li) if n not in abs_today and not staff_by_name[n].rotations]:
             opts = free_ogs(day); 
             if not opts: continue
-            minv = min(FA_COUNTS[day][og] for og in opts); bucket=[og for og in opts if FA_COUNTS[day][og]==minv]
-            og = rng.choice(bucket); _place_in_og(ws,day,og,name,False)
+            minv = min(FA_COUNTS[day][og] for og in opts)
+            bucket = [og for og in opts if FA_COUNTS[day][og] == minv]
+            
+            # Choose OG based on priority order or random
+            if USE_RANDOM_OG_SELECTION:
+                og = rng.choice(bucket)
+            else:
+                # Sort by priority order, take first
+                bucket_sorted = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)
+                og = bucket_sorted[0]
+            
+            _place_in_og(ws, day, og, name, False)
 
         # 3) coverage flags
         for og in OG_LIST:
@@ -729,23 +768,29 @@ def _filter_candidates(base: List[str], *, day: str, site: str,
         c = [n for n in c if n not in laufen_names]
     return c
 
-def _fair_pick_pool(meeting_key: str, pool_idx: int, candidates: List[str], rng: random.Random) -> Optional[str]:
+def _fair_pick_pool(meeting_key: str, pool_idx: int, candidates: List[str], 
+                    rng: random.Random, day: str) -> Optional[str]:
     """
-    Fair pick for a given meeting pool:
-      1) Prefer people with FEWER total meetings (meetings_count) over the week.
-      2) Among those, prefer those with fewer uses in THIS meeting/pool (POOL_COUNTS).
+    Fair pick for a given meeting pool with per-day and per-week balancing:
+      1) Prefer people with FEWER meetings TODAY (meetings_count_<day>)
+      2) Among those, prefer FEWER meetings THIS WEEK (meetings_count_week)
+      3) Random choice among equals (using SEED for reproducibility)
+    
+    Note: POOL_COUNTS is no longer used - day and week counters provide better fairness.
     """
     if not candidates:
         return None
 
-    # Step 1: global meeting load
-    min_meet = min(staff_by_name[n].meetings_count for n in candidates)
-    cand_by_meet = [n for n in candidates if staff_by_name[n].meetings_count == min_meet]
+    # Step 1: Prefer people with fewer meetings today
+    day_counter_name = f"meetings_count_{day.lower()}"
+    min_today = min(getattr(staff_by_name[n], day_counter_name, 0) for n in candidates)
+    cand_by_today = [n for n in candidates if getattr(staff_by_name[n], day_counter_name, 0) == min_today]
 
-    # Step 2: per-meeting/pool fairness
-    min_pool = min(POOL_COUNTS[(meeting_key, pool_idx, n)] for n in cand_by_meet)
-    bucket = [n for n in cand_by_meet if POOL_COUNTS[(meeting_key, pool_idx, n)] == min_pool]
+    # Step 2: Among those, prefer people with fewer meetings this week
+    min_week = min(staff_by_name[n].meetings_count_week for n in cand_by_today)
+    bucket = [n for n in cand_by_today if staff_by_name[n].meetings_count_week == min_week]
 
+    # Step 3: Random choice with SEED
     return rng.choice(bucket)
 
 def _bump_pool(meeting_key: str, pool_idx: int, name: str):
@@ -805,13 +850,20 @@ def assign_meeting_by_pools(
                 laufen_names=laufen_names,
             )
 
-            pick = _fair_pick_pool(meeting_key, idx, cands, rng)
+            pick = _fair_pick_pool(meeting_key, idx, cands, rng, day)
             if pick:
                 _assign(ws, a1, pick, style)
                 if monday_style and day == "Montag":
                     if monday_style == "red": set_red(ws, a1)
                 _bump_pool(meeting_key, idx, pick)
-                staff_by_name[pick].meetings_count += 1
+                
+                # Increment counters
+                staff_by_name[pick].meetings_count += 1  # Deprecated but kept for stats
+                staff_by_name[pick].meetings_count_week += 1
+                day_counter_name = f"meetings_count_{day.lower()}"
+                current_count = getattr(staff_by_name[pick], day_counter_name, 0)
+                setattr(staff_by_name[pick], day_counter_name, current_count + 1)
+                
                 placed = True
                 break
 
@@ -944,44 +996,83 @@ def patch_xlsm(output_path: str, input_path: str) -> None:
 # CSV Import Functions
 # ===========================================================================
 
-def csv_name_to_abbreviated(csv_name: str) -> str:
+def match_csv_name_to_staff(csv_name: str) -> Optional[str]:
     """
-    Convert CSV name format to abbreviated format used in staff.json.
+    Match a CSV name to the exact staff.json name by surname, with initial fallback for duplicates.
     
-    Rules:
-    - Only use the FIRST given name
-    - Handle hyphens within that first name
-    - Normalize á→a (not available on German/Swiss keyboards)
-    - Keep other special characters (é, ä, ö, ü)
+    CSV format: "Nachname(n) Vorname(n)" - last part is always first name
+    staff.json format: "Initial(s) Nachname" - last part is always surname
+    
+    Strategy:
+    1. Take all parts from CSV except the last (those are surname parts)
+    2. Split by hyphens to get all surname candidates
+    3. Match against staff.json surnames (last part of staff name)
+    4. If multiple matches, filter by first initial
+    5. Return exact staff.json name
     
     Examples:
-        "Brandenberger Daniel" → "D. Brandenberger"
-        "Ott Hans-Werner" → "H.W. Ott"  (hyphenated first name)
-        "Rasch Helmut Fritz" → "H. Rasch"  (ignore "Fritz")
-        "Páli Steven" → "S. Pali"  (á→a)
-        "Vitéz Steven" → "S. Vitéz"  (é preserved)
+        "Iacobut Andreea-Emilia" → "A. Iacobut"
+        "Slezenkovska-Stojanoska Tanja" → "T. Slezenkovska"
+        "Berberich Bettina Katharina" → "B. Berberich"
+        "Ott Hans-Werner" → "H.W. Ott"
     """
-    parts = csv_name.strip().split()
-    if len(parts) < 2:
-        return csv_name  # Return as-is if format unexpected
+    csv_parts = csv_name.strip().split()
+    if len(csv_parts) < 2:
+        return None
     
-    surname = parts[0]
-    first_given_name = parts[1]  # Only take first given name, ignore rest
+    # All parts except last = surname parts
+    surname_parts = csv_parts[:-1]
+    # Last part = first name
+    first_name = csv_parts[-1]
     
-    # Normalize á→a (both lowercase and uppercase)
-    surname = surname.replace('á', 'a').replace('Á', 'A')
-    first_given_name = first_given_name.replace('á', 'a').replace('Á', 'A')
+    # Get first initial from first name (handle hyphens)
+    first_initial = first_name.split('-')[0][0].upper() if first_name else None
     
-    # Extract first letter of each part (handle hyphens within first name)
-    # "Hans-Werner" → ["Hans", "Werner"] → "H.W."
-    # "Daniel" → ["Daniel"] → "D."
-    initials = []
-    for part in first_given_name.split("-"):
-        if part:  # Skip empty parts
-            initials.append(part[0].upper())
+    # Split surnames by hyphens and collect all surname candidates
+    surname_candidates = []
+    for part in surname_parts:
+        if '-' in part:
+            surname_candidates.extend(part.split('-'))
+        else:
+            surname_candidates.append(part)
     
-    initials_str = ".".join(initials) + "." if initials else ""
-    return f"{initials_str} {surname}" if initials_str else surname
+    # Normalize: lowercase for comparison
+    surname_candidates_lower = [s.lower() for s in surname_candidates]
+    
+    # Find all staff with matching surname
+    matches = []
+    for staff_name in staff_by_name.keys():
+        staff_parts = staff_name.split()
+        if len(staff_parts) < 2:
+            continue
+        
+        # Last part of staff name is the surname
+        staff_surname = staff_parts[-1].lower()
+        
+        if staff_surname in surname_candidates_lower:
+            matches.append(staff_name)
+    
+    # If single match, return it
+    if len(matches) == 1:
+        return matches[0]
+    
+    # If multiple matches, filter by first initial
+    if len(matches) > 1 and first_initial:
+        initial_matches = [m for m in matches if m.split()[0][0].upper() == first_initial]
+        if len(initial_matches) == 1:
+            return initial_matches[0]
+        elif len(initial_matches) > 1:
+            # Still ambiguous - return first and warn
+            print(f"Warning: Ambiguous match for {csv_name}: {initial_matches}, using {initial_matches[0]}")
+            return initial_matches[0]
+    
+    # No match or still ambiguous
+    if matches:
+        print(f"Warning: Multiple surname matches for {csv_name}: {matches}, using {matches[0]}")
+        return matches[0]
+    
+    print(f"Warning: No staff match found for CSV name: {csv_name}")
+    return None
 
 
 def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
@@ -1012,7 +1103,7 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     
     # Write date to T20 (if date_cells exist in layout)
     if DATE_CELLS and "first_monday" in DATE_CELLS:
-        ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%m/%d/%Y')
+        ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%d.%m.%Y')
     
     # Calculate and write KW (ISO week number)
     if DATE_CELLS and "kw_number" in DATE_CELLS:
@@ -1045,8 +1136,12 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         date = row['Datum']
         day_name = day_names[date.dayofweek]
         
-        # Convert name format
-        abbrev_name = csv_name_to_abbreviated(csv_name)
+        # Convert name format - match to staff.json
+        matched_name = match_csv_name_to_staff(csv_name)
+        if not matched_name:
+            print(f"Skipping unknown person from CSV: {csv_name}")
+            continue
+        abbrev_name = matched_name
         
         # Categorize dienst
         if dienst_type in ABSENZ_TYPES:
