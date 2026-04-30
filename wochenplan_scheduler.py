@@ -52,9 +52,16 @@ def _load_og_rules():
     with open(_path, encoding="utf-8") as _f:
         _r = json.load(_f)
     
-    global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION
+    global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION, OG_WEIGHTS
     OG_PRIORITY_ORDER = _r.get("og_priority_order", OG_LIST)
     USE_RANDOM_OG_SELECTION = _r.get("use_random_og_selection", False)
+    OG_WEIGHTS = _r.get("og_weights", {})
+    
+    # Set defaults for any missing OGs
+    for og in OG_LIST:
+        if og not in OG_WEIGHTS:
+            # Default: Mammo and Intervention get 0.4, others get 0.6
+            OG_WEIGHTS[og] = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
     
     return (
         set(_r.get("rotation_or_leader_only", [])),
@@ -65,6 +72,7 @@ def _load_og_rules():
 
 OG_PRIORITY_ORDER: List[str] = []
 USE_RANDOM_OG_SELECTION: bool = False
+OG_WEIGHTS: Dict[str, float] = {}
 OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
 OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}  # Laufen always skipped
 
@@ -84,8 +92,7 @@ class Staff:
     rotations: Set[str] = field(default_factory=set)        # AA + FA(non-leader)
     fr_excluded: bool = False                               # if True → never Frontarzt on any day
     fr_excluded_days: Set[str] = field(default_factory=set) # excluded on specific weekdays only
-    absent_by_default: bool = False                         # if True → absent unless covers_for person is absent
-    covers_for: Optional[str] = None                        # name of the person this staff member stands in for
+    is_cover: bool = False                                  # if True → Stellvertreter (not shown in absence list)
 
     # Counters
     meetings_count: int = 0  # Deprecated - kept for backwards compatibility
@@ -110,8 +117,7 @@ def add_staff(name: str, role: str, site: str,
               rotation: Optional[List[str]] = None,
               fr_excluded: bool = False,
               fr_excluded_days: Optional[List[str]] = None,
-              absent_by_default: bool = False,
-              covers_for: Optional[str] = None):
+              is_cover: bool = False):
     leads = set(leads_for or []) if role == LA else set()
     rots  = set(rotation or [])
     staff_by_name[name] = Staff(
@@ -122,8 +128,7 @@ def add_staff(name: str, role: str, site: str,
         rotations=rots,
         fr_excluded=fr_excluded,
         fr_excluded_days=set(fr_excluded_days or []),
-        absent_by_default=absent_by_default,
-        covers_for=covers_for,
+        is_cover=is_cover,
     )
 
 def rebuild_quick_views() -> None:
@@ -147,10 +152,22 @@ def rebuild_quick_views() -> None:
 
 def load_staff_from_json(path: str) -> None:
     """Load staff from a JSON file, replacing the current staff_by_name contents.
-    JSON format: list of objects with keys name, role, site, leads_ogs, rotations, fr_excluded.
+    JSON format: list of objects with keys name, role, site, leads_ogs, rotations, fr_excluded, is_cover.
+    Also loads site_rules from the same JSON file.
     Rebuilds all quick-view lists automatically."""
     with open(path, encoding="utf-8") as f:
-        records = json.load(f)
+        data = json.load(f)
+    
+    # Load site_rules if present
+    global SITE_RULES
+    if isinstance(data, dict) and "site_rules" in data:
+        SITE_RULES = data.get("site_rules", {})
+        records = data.get("staff", [])
+    else:
+        # Old format: just array of staff
+        SITE_RULES = {"BH": {"no_oa_vormittag": False}, "LI": {"no_oa_vormittag": True}}
+        records = data
+    
     staff_by_name.clear()
     for r in records:
         add_staff(
@@ -161,8 +178,7 @@ def load_staff_from_json(path: str) -> None:
             rotation=r.get("rotations", []),
             fr_excluded=r.get("fr_excluded", False),
             fr_excluded_days=r.get("fr_excluded_days", []),
-            absent_by_default=r.get("absent_by_default", False),
-            covers_for=r.get("covers_for", None),
+            is_cover=r.get("is_cover", False),
         )
     rebuild_quick_views()
 
@@ -171,6 +187,9 @@ def load_staff_from_json(path: str) -> None:
 aa_bh = aa_li = oa_bh = oa_li = []
 fa_all_bh = fa_all_li = la_bh = la_li = []
 leaders_by_og: Dict[str, List[str]] = {}
+
+# Site rules loaded from staff.json
+SITE_RULES: Dict[str, Dict[str, bool]] = {}
 
 # staff.json is the single source of truth — always load from it.
 _staff_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), "staff.json")
@@ -342,52 +361,56 @@ def _add_from_range(ws: Worksheet, a1: str, dest: set):
                 for t in tokens_from_val(str(cell.value)):
                     dest.add(t)
 
-def apply_substitution_rules(
-    absences_by_day: Dict[str, Set[str]]
-) -> Dict[str, Set[str]]:
-    """
-    Apply absent_by_default / covers_for rules from staff_by_name.
-
-    For each staff member with absent_by_default=True:
-      - They start absent every day.
-      - If their covers_for person is absent that day, they become available
-        (removed from the absence set), UNLESS they are also explicitly listed
-        as absent in the Excel file.
-    """
-    # Collect names explicitly absent in the Excel (before any rule is applied)
-    explicit: Dict[str, Set[str]] = {
-        day: set(names) for day, names in absences_by_day.items()
-    }
-
-    adjusted: Dict[str, Set[str]] = {
-        day: set(names) for day, names in absences_by_day.items()
-    }
-
-    for s in staff_by_name.values():
-        if not s.absent_by_default:
-            continue
-        for day in WEEKDAYS:
-            day_set = adjusted.setdefault(day, set())
-            explicit_day = explicit.get(day, set())
-
-            if s.covers_for and s.covers_for in day_set:
-                # The person they cover for is absent → they may work
-                # Only make them available if they are not explicitly absent
-                if s.name not in explicit_day:
-                    day_set.discard(s.name)
-            else:
-                # Covered person is present → stand-in stays absent
-                day_set.add(s.name)
-
-    return adjusted
-
-
 def read_absences_by_day(ws: Worksheet) -> Dict[str, Set[str]]:
+    """Read absences from ABW_RANGES and NACHT_RANGES cells."""
     absences = {d: set() for d in WEEKDAYS}
     for d in WEEKDAYS:
         _add_from_range(ws, ABW_RANGES[d], absences[d])
         _add_from_range(ws, NACHT_RANGES[d], absences[d])
-    return apply_substitution_rules(absences)
+    return absences
+
+def remove_covers_from_absences_visual(ws: Worksheet) -> None:
+    """
+    Remove covers (Stellvertreter) from the visual absence list in ABW_RANGES.
+    This is called AFTER the pipeline has finished, purely for display purposes.
+    The pipeline itself uses the full absence list (including covers).
+    """
+    # Find all staff who are covers
+    cover_names = {s.name for s in staff_by_name.values() if s.is_cover}
+    
+    if not cover_names:
+        return  # Nothing to do
+    
+    # For each day's absence range
+    for day in WEEKDAYS:
+        if day not in ABW_RANGES:
+            continue
+        
+        cell_range = ABW_RANGES[day]
+        
+        # Read current names from the range
+        current_names = []
+        for row in ws[cell_range]:
+            for cell in row:
+                val = cell.value
+                if val and isinstance(val, str):
+                    for name in tokens_from_val(val):
+                        if name:
+                            current_names.append(name)
+        
+        # Filter out covers
+        filtered_names = [n for n in current_names if n not in cover_names]
+        
+        # Clear ALL cells in range
+        for row in ws[cell_range]:
+            for cell in row:
+                cell.value = None
+        
+        # Write back filtered list (from top)
+        cells_list = [cell for row in ws[cell_range] for cell in row]
+        for i, name in enumerate(filtered_names):
+            if i < len(cells_list):
+                cells_list[i].value = name
 
 def _make_font(old: Font, *, bold: bool, color: str) -> Font:
     """
@@ -525,12 +548,11 @@ def pick_fa_for_fr_shift(day: str, fa_pool: list,
 def assign_fr_shifts_to_cells(
     ws: Worksheet,
     absences_orig: Dict[str, Set[str]],
-    seed: Optional[int] = None,
+    rng: random.Random,
     *,
     extra_exclusions: Optional[Dict[str, Set[str]]] = None,
     include_laufen_from_og: bool = True,
 ) -> None:
-    rng = random.Random(seed)
     abs_fr = absences_for_fr_stage(ws, absences_orig,
                                    extra_exclusions=extra_exclusions,
                                    include_laufen_from_og=include_laufen_from_og)
@@ -650,8 +672,7 @@ def _place_in_og(ws: Worksheet, day: str, og: str, name: str, count_for_fa: bool
         FA_COUNTS[day][og] += 1
     return True
 
-def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]], seed: Optional[int]=None) -> Dict[str,Dict[str,int]]:
-    rng = random.Random(seed)
+def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]], rng: random.Random) -> Dict[str,Dict[str,int]]:
     for day in WEEKDAYS:
         if day in FEIERTAGE:
             continue  # Skip holidays
@@ -870,9 +891,7 @@ def assign_meeting_by_pools(
         if not placed and fallback_text is not None:
             _assign(ws, a1, fallback_text, fallback_style)
 
-def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], seed: Optional[int]=None):
-    rng = random.Random(seed)
-
+def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Random):
     write_medizin_placeholders_monday(ws)
 
     laufen_by_day = read_laufen_by_day(ws)
@@ -1296,6 +1315,9 @@ if __name__ == "__main__":
 
     # Start with fresh counters
     reset_all_counters()
+    
+    # Create single RNG for entire pipeline (reproducible with seed)
+    rng = random.Random(args.seed)
 
     # Intermediate filenames (only used when --keep-intermediate is set)
     out_stem       = os.path.splitext(args.output)[0]
@@ -1334,19 +1356,22 @@ if __name__ == "__main__":
         patch_xlsm(og_leaders_out, args.input)
 
     # 2) OG non-leaders (FA/AA) + flags
-    assign_nonleaders_to_ogs(ws, absences, seed=args.seed)
+    assign_nonleaders_to_ogs(ws, absences, rng)
     if args.keep_intermediate:
         wb.save(og_full_out)
         patch_xlsm(og_full_out, args.input)
 
     # 3) FR (depends on OG + Laufen in OG)
-    assign_fr_shifts_to_cells(ws, absences, seed=args.seed)
+    assign_fr_shifts_to_cells(ws, absences, rng)
     if args.keep_intermediate:
         wb.save(fr_out)
         patch_xlsm(fr_out, args.input)
 
     # 4) Meetings
-    assign_meetings(ws, absences, seed=args.seed)
+    assign_meetings(ws, absences, rng)
+    
+    # 5) Remove covers from visual absence list (purely cosmetic)
+    remove_covers_from_absences_visual(ws)
 
     # Save final output once and patch
     wb.save(args.output)
