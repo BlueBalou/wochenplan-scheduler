@@ -26,6 +26,26 @@ TEMPLATE_XLSM = Path(__file__).parent / "KW_xx_TEMPLATE.xlsm"
 OG_LIST_NO_LAUFEN = [og for og in sched.OG_LIST if og != "Laufen"]
 ALL_WEEKDAYS = sched.WEEKDAYS  # ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag"]
 
+# Pool constants
+_POOL_TYPES_MAP = {
+    "names": "Person",
+    "group": "Gruppe",
+    "spaetdienst_aa": "Spätdienst_AA"
+}
+_POOL_TYPES = list(_POOL_TYPES_MAP.keys())
+_POOL_TYPES_DISPLAY = list(_POOL_TYPES_MAP.values())
+
+_GROUP_MAP = {
+    "AA": "AA",
+    "OA": "OA",
+    "LA": "LA",
+    "FA_ALL": "alle Fachärzte"
+}
+_GROUP_OPTIONS = list(_GROUP_MAP.keys())
+_GROUP_DISPLAY = list(_GROUP_MAP.values())
+
+_SITE_OPTIONS = ["BH", "LI"]
+
 # ---------------------------------------------------------------------------
 # Layout helpers
 # ---------------------------------------------------------------------------
@@ -109,6 +129,129 @@ def staff_to_display_dataframe() -> pd.DataFrame:
             "Stellvertreter": "Ja" if s.is_cover else "—",
         })
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Rapporte helpers
+# ---------------------------------------------------------------------------
+
+_COL_CFG = {
+    day: st.column_config.TextColumn(day[:2], help=day)
+    for day in ALL_WEEKDAYS
+}
+
+def _rapport_overview_df() -> pd.DataFrame:
+    """Overview table of all rapporte from meeting_pools.json."""
+    pools_data = load_meeting_pools()
+    rows = []
+    for key in pools_data:
+        parts = key.split("|", 1)
+        site = parts[0] if len(parts) == 2 else "?"
+        name = parts[1] if len(parts) == 2 else key
+        rows.append({"Key": key, "Name": name, "Standort": site})
+    return pd.DataFrame(rows)
+
+
+def _rename_rapport(old_key: str, new_key: str) -> None:
+    """Rename a rapport key atomically in both layout.json and meeting_pools.json."""
+    # --- meeting_pools.json ---
+    pools_data = load_meeting_pools()
+    if old_key not in pools_data:
+        raise KeyError(f"Rapport '{old_key}' nicht in meeting_pools.json gefunden.")
+    cfg = pools_data.pop(old_key)
+    pools_data[new_key] = cfg
+    save_meeting_pools(pools_data)
+
+    # --- layout.json ---
+    layout = load_layout()
+    old_parts = old_key.split("|", 1)
+    new_parts = new_key.split("|", 1)
+    old_site, old_name = old_parts[0], old_parts[1]
+    new_site, new_name = new_parts[0], new_parts[1]
+
+    # Move cell mappings: remove from old site/name, insert under new site/name
+    old_cells = layout["meeting_cells"].get(old_site, {}).pop(old_name, {})
+    layout["meeting_cells"].setdefault(new_site, {})[new_name] = old_cells
+    save_layout(layout)
+
+
+def _delete_rapport(key: str) -> None:
+    """Delete a rapport from both layout.json and meeting_pools.json."""
+    pools_data = load_meeting_pools()
+    pools_data.pop(key, None)
+    save_meeting_pools(pools_data)
+
+    layout = load_layout()
+    parts = key.split("|", 1)
+    if len(parts) == 2:
+        layout["meeting_cells"].get(parts[0], {}).pop(parts[1], None)
+    save_layout(layout)
+
+
+def _add_rapport(key: str, exclude_laufen: bool = False) -> None:
+    """Add a new rapport to both layout.json and meeting_pools.json with empty defaults."""
+    pools_data = load_meeting_pools()
+    pools_data[key] = {
+        "site": key.split("|", 1)[0],
+        "pools": [{"type": "names", "names": [], "site": key.split("|", 1)[0], "exclude_laufen": exclude_laufen}],
+        "fallback_text": "FÄLLT AUS",
+        "roter_fallback_text": True,
+    }
+    save_meeting_pools(pools_data)
+
+    layout = load_layout()
+    parts = key.split("|", 1)
+    site, name = parts[0], parts[1]
+    layout["meeting_cells"].setdefault(site, {}).setdefault(name, {
+        day: [] for day in ALL_WEEKDAYS
+    })
+    save_layout(layout)
+
+
+# ---------------------------------------------------------------------------
+# Pool helpers
+# ---------------------------------------------------------------------------
+
+def _exclude_if_day_to_str(eid: dict | None) -> str:
+    """Convert {"Donnerstag": ["H.W. Ott"]} → 'Donnerstag: H.W. Ott'"""
+    if not eid:
+        return ""
+    parts = []
+    for day, names in eid.items():
+        if isinstance(names, (list, tuple)):
+            parts.append(f"{day}: {', '.join(names)}")
+        else:
+            parts.append(f"{day}: {names}")
+    return "; ".join(parts)
+
+
+def _str_to_exclude_if_day(s: str) -> dict | None:
+    """Convert 'Donnerstag: H.W. Ott, X; Freitag: Y' → dict."""
+    if not s or not s.strip():
+        return None
+    result = {}
+    for part in s.split(";"):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        day, names_str = part.split(":", 1)
+        day = day.strip()
+        names = [n.strip() for n in names_str.split(",") if n.strip()]
+        if day and names:
+            result[day] = names
+    return result or None
+
+
+def _list_to_str(lst: list | None) -> str:
+    if not lst:
+        return ""
+    return ", ".join(str(x) for x in lst)
+
+
+def _str_to_list(s: str) -> list:
+    if not s or not s.strip():
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -315,13 +458,34 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
     return None
 
 
-tab_template, tab_eigene, tab_Feiertage, tab_personal, tab_pools, tab_organgruppen, tab_laufen, tab_rapporte, tab_layout = st.tabs(["Wochenplan mit Standard-Vorlage", "Wochenplan mit eigener Vorlage", "Feiertage", "Personalverwaltung", "Rapporte-Pools", "Organgruppen", "Radiologe in Laufen", "Rapporte verwalten", "Layout-Editor"])
-
 # ===========================================================================
-# TAB 1 — Wochenplan mit Standard-Vorlage
+# SIDEBAR NAVIGATION
 # ===========================================================================
 
-with tab_template:
+st.sidebar.title("Navigation")
+
+page = st.sidebar.radio(
+    "Seite auswählen:",
+    [
+        "📋 Wochenplan (Standard)",
+        "📄 Wochenplan (Eigene Vorlage)", 
+        "📅 Feiertage",
+        "👥 Personalverwaltung",
+        "📊 Rapporte verwalten",
+        "📊 Rapporte-Pools",
+        "🏥 Organgruppen Verwalten",
+        "🏥 Organgruppen Regeln",
+        "🏃 Laufen",
+        "🔧 Layout-Editor"
+    ],
+    label_visibility="collapsed"
+)
+
+# ===========================================================================
+# PAGE 1 — Wochenplan (Standard)
+# ===========================================================================
+
+if page == "📋 Wochenplan (Standard)":
     # Check if template exists
     template_exists = TEMPLATE_XLSM.exists()
     if not template_exists:
@@ -463,7 +627,7 @@ with tab_template:
 # TAB 2 — Wochenplan mit eigener Vorlage
 # ===========================================================================
  
-with tab_eigene:
+elif page == "📄 Wochenplan (Eigene Vorlage)":
 
     st.markdown("### 📤 CSV + 📤 Eigene Vorlage 🪄→ fertiger Wochenplan")
     
@@ -587,7 +751,7 @@ with tab_eigene:
 # ===========================================================================
 # TAB 3 — Feiertage
 # ===========================================================================
-with tab_Feiertage:
+elif page == "📅 Feiertage":
 
     st.markdown("### 🎉 Feiertage")
     st.caption("Wähle Wochentage, die als Feiertage behandelt werden sollen (keine Absenzen, OG, FR, Rapporte).")
@@ -613,7 +777,7 @@ with tab_Feiertage:
 # ===========================================================================
 # TAB 4 — Personalverwaltung
 # ===========================================================================
-with tab_personal:
+elif page == "👥 Personalverwaltung":
     st.subheader("Personalbestand")
 
     # Read-only overview table with color-coded roles
@@ -787,90 +951,8 @@ with tab_personal:
         st.success("Standort-Regeln gespeichert!")
         st.rerun()
 
-# ===========================================================================
-# TAB 5 — Layout-Editor
-# ===========================================================================
 
-_COL_CFG = {
-    day: st.column_config.TextColumn(day[:2], help=day)
-    for day in ALL_WEEKDAYS
-}
-
-
-
-# ===========================================================================
-# TAB 7 — Rapporte verwalten
-# ===========================================================================
-
-def _rapport_overview_df() -> pd.DataFrame:
-    """Overview table of all rapporte from meeting_pools.json."""
-    pools_data = load_meeting_pools()
-    rows = []
-    for key in pools_data:
-        parts = key.split("|", 1)
-        site = parts[0] if len(parts) == 2 else "?"
-        name = parts[1] if len(parts) == 2 else key
-        rows.append({"Key": key, "Name": name, "Standort": site})
-    return pd.DataFrame(rows)
-
-
-def _rename_rapport(old_key: str, new_key: str) -> None:
-    """Rename a rapport key atomically in both layout.json and meeting_pools.json."""
-    # --- meeting_pools.json ---
-    pools_data = load_meeting_pools()
-    if old_key not in pools_data:
-        raise KeyError(f"Rapport '{old_key}' nicht in meeting_pools.json gefunden.")
-    cfg = pools_data.pop(old_key)
-    pools_data[new_key] = cfg
-    save_meeting_pools(pools_data)
-
-    # --- layout.json ---
-    layout = load_layout()
-    old_parts = old_key.split("|", 1)
-    new_parts = new_key.split("|", 1)
-    old_site, old_name = old_parts[0], old_parts[1]
-    new_site, new_name = new_parts[0], new_parts[1]
-
-    # Move cell mappings: remove from old site/name, insert under new site/name
-    old_cells = layout["meeting_cells"].get(old_site, {}).pop(old_name, {})
-    layout["meeting_cells"].setdefault(new_site, {})[new_name] = old_cells
-    save_layout(layout)
-
-
-def _delete_rapport(key: str) -> None:
-    """Delete a rapport from both layout.json and meeting_pools.json."""
-    pools_data = load_meeting_pools()
-    pools_data.pop(key, None)
-    save_meeting_pools(pools_data)
-
-    layout = load_layout()
-    parts = key.split("|", 1)
-    if len(parts) == 2:
-        layout["meeting_cells"].get(parts[0], {}).pop(parts[1], None)
-    save_layout(layout)
-
-
-def _add_rapport(key: str, exclude_laufen: bool = False) -> None:
-    """Add a new rapport to both layout.json and meeting_pools.json with empty defaults."""
-    pools_data = load_meeting_pools()
-    pools_data[key] = {
-        "site": key.split("|", 1)[0],
-        "pools": [{"type": "names", "names": [], "site": key.split("|", 1)[0], "exclude_laufen": exclude_laufen}],
-        "fallback_text": "FÄLLT AUS",
-        "roter_fallback_text": True,
-    }
-    save_meeting_pools(pools_data)
-
-    layout = load_layout()
-    parts = key.split("|", 1)
-    site, name = parts[0], parts[1]
-    layout["meeting_cells"].setdefault(site, {}).setdefault(name, {
-        day: [] for day in ALL_WEEKDAYS
-    })
-    save_layout(layout)
-
-
-with tab_rapporte:
+elif page == "📊 Rapporte verwalten":
     st.subheader("Rapporte verwalten")
     st.caption("Rapporte hinzufügen, umbenennen oder löschen. Zellen werden im Layout-Editor bearbeitet.")
 
@@ -941,7 +1023,7 @@ with tab_rapporte:
                     st.error(f"Fehler: {e}")
 
 
-with tab_layout:
+elif page == "🔧 Layout-Editor":
     st.subheader("Layout-Editor")
     st.caption(
         "Excel-Zellreferenzen für alle Planabschnitte bearbeiten. "
@@ -1118,70 +1200,9 @@ with tab_layout:
 # ===========================================================================
 
 # Pool type options with display labels
-_POOL_TYPES_MAP = {
-    "names": "Person",
-    "group": "Gruppe",
-    "spaetdienst_aa": "Spätdienst_AA"
-}
-_POOL_TYPES = list(_POOL_TYPES_MAP.keys())
-_POOL_TYPES_DISPLAY = list(_POOL_TYPES_MAP.values())
-
-# Group options with display labels
-_GROUP_MAP = {
-    "AA": "AA",
-    "OA": "OA",
-    "LA": "LA",
-    "FA_ALL": "alle Fachärzte"
-}
-_GROUP_OPTIONS = list(_GROUP_MAP.keys())
-_GROUP_DISPLAY = list(_GROUP_MAP.values())
-
-_SITE_OPTIONS = ["BH", "LI"]
 
 
-def _exclude_if_day_to_str(eid: dict | None) -> str:
-    """Convert {"Donnerstag": ["H.W. Ott"]} → 'Donnerstag: H.W. Ott'"""
-    if not eid:
-        return ""
-    parts = []
-    for day, names in eid.items():
-        if isinstance(names, (list, tuple)):
-            parts.append(f"{day}: {', '.join(names)}")
-        else:
-            parts.append(f"{day}: {names}")
-    return "; ".join(parts)
-
-
-def _str_to_exclude_if_day(s: str) -> dict | None:
-    """Convert 'Donnerstag: H.W. Ott, X; Freitag: Y' → dict."""
-    if not s or not s.strip():
-        return None
-    result = {}
-    for part in s.split(";"):
-        part = part.strip()
-        if ":" not in part:
-            continue
-        day, names_str = part.split(":", 1)
-        day = day.strip()
-        names = [n.strip() for n in names_str.split(",") if n.strip()]
-        if day and names:
-            result[day] = names
-    return result or None
-
-
-def _list_to_str(lst: list | None) -> str:
-    if not lst:
-        return ""
-    return ", ".join(str(x) for x in lst)
-
-
-def _str_to_list(s: str) -> list:
-    if not s or not s.strip():
-        return []
-    return [x.strip() for x in s.split(",") if x.strip()]
-
-
-with tab_pools:
+elif page == "📊 Rapporte-Pools":
     st.subheader("Rapporte-Pools")
     st.caption(
         "Hier können die Prioritäts-Pools für jeden Rapport bearbeitet werden. "
@@ -1357,10 +1378,122 @@ with tab_pools:
 
 
 # ===========================================================================
-# TAB 5.5 — Organgruppen
+# Organgruppen parent placeholder
 # ===========================================================================
 
-with tab_organgruppen:
+# ===========================================================================
+# Organgruppen Verwalten
+# ===========================================================================
+
+elif page == "🏥 Organgruppen Verwalten":
+    st.subheader("Organgruppen verwalten")
+    st.caption("Hinzufügen oder Entfernen von Organgruppen. Laufen ist eine spezielle OG und wird immer angezeigt.")
+    
+    # Load current OGs
+    og_file = Path(sched._staff_json).parent / "organgruppen.json"
+    if og_file.exists():
+        with open(og_file, encoding="utf-8") as f:
+            og_data = json.load(f)
+            current_ogs = og_data.get("organgruppen", [])
+    else:
+        current_ogs = ["MSK", "Neuro", "Onko", "Thorax", "Abdomen", "Mammo", "Intervention/ Vaskulär", "Nuklearmedizin"]
+    
+    # Display current OGs
+    st.markdown("### Aktuelle Organgruppen")
+    for og in current_ogs:
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown(f"**{og}**")
+        with col2:
+            if st.button("Löschen", key=f"delete_og_{og}"):
+                # Confirm deletion
+                st.session_state[f"confirm_delete_{og}"] = True
+        
+        # Show confirmation dialog
+        if st.session_state.get(f"confirm_delete_{og}", False):
+            st.warning(f"⚠️ Möchten Sie '{og}' wirklich löschen? Dies entfernt die OG aus allen Konfigurationen und Personal-Rotationen.")
+            col_yes, col_no = st.columns(2)
+            with col_yes:
+                if st.button("Ja, löschen", key=f"confirm_yes_{og}", type="primary"):
+                    # Remove from organgruppen.json
+                    current_ogs.remove(og)
+                    with open(og_file, "w", encoding="utf-8") as f:
+                        json.dump({"organgruppen": current_ogs}, f, ensure_ascii=False, indent=2)
+                    
+                    # Remove from og_rules.json
+                    og_rules = load_og_rules()
+                    if og in og_rules.get("og_priority_order", []):
+                        og_rules["og_priority_order"].remove(og)
+                    for key in ["og_weights_oa", "og_weights_aa", "og_max_fas", "og_max_aas"]:
+                        if og in og_rules.get(key, {}):
+                            del og_rules[key][og]
+                    for key in ["rotation_or_leader_only", "warn_kein_aa", "warn_weniger_als_2fa", "warn_kein_fa_site"]:
+                        if og in og_rules.get(key, []):
+                            og_rules[key].remove(og)
+                    save_og_rules(og_rules)
+                    
+                    # Remove from staff.json (rotations and leads_ogs)
+                    for staff in sched.staff_by_name.values():
+                        if og in staff.rotations:
+                            staff.rotations.remove(og)
+                        if og in staff.leads_ogs:
+                            staff.leads_ogs.remove(og)
+                    save_staff_to_json()
+                    
+                    # Reload
+                    sched.reload_og_rules()
+                    
+                    del st.session_state[f"confirm_delete_{og}"]
+                    st.success(f"'{og}' wurde gelöscht.")
+                    st.rerun()
+            
+            with col_no:
+                if st.button("Abbrechen", key=f"confirm_no_{og}"):
+                    del st.session_state[f"confirm_delete_{og}"]
+                    st.rerun()
+    
+    # Add new OG
+    st.divider()
+    st.markdown("### Neue Organgruppe hinzufügen")
+    
+    with st.form("add_og_form"):
+        new_og_name = st.text_input("Name der neuen Organgruppe")
+        submitted = st.form_submit_button("Hinzufügen", type="primary")
+        
+        if submitted:
+            if not new_og_name.strip():
+                st.error("Bitte geben Sie einen Namen ein.")
+            elif new_og_name.strip() in current_ogs:
+                st.error(f"'{new_og_name.strip()}' existiert bereits.")
+            elif new_og_name.strip() == "Laufen":
+                st.error("'Laufen' ist eine spezielle OG und kann nicht manuell hinzugefügt werden.")
+            else:
+                # Add to organgruppen.json
+                current_ogs.append(new_og_name.strip())
+                with open(og_file, "w", encoding="utf-8") as f:
+                    json.dump({"organgruppen": current_ogs}, f, ensure_ascii=False, indent=2)
+                
+                # Add to og_rules.json with defaults
+                og_rules = load_og_rules()
+                og_rules["og_priority_order"].append(new_og_name.strip())
+                og_rules.setdefault("og_weights_oa", {})[new_og_name.strip()] = 0.6
+                og_rules.setdefault("og_weights_aa", {})[new_og_name.strip()] = 0.6
+                og_rules.setdefault("og_max_fas", {})[new_og_name.strip()] = None
+                og_rules.setdefault("og_max_aas", {})[new_og_name.strip()] = None
+                save_og_rules(og_rules)
+                
+                # Reload
+                sched.reload_og_rules()
+                
+                st.success(f"'{new_og_name.strip()}' wurde hinzugefügt.")
+                st.rerun()
+
+
+# ===========================================================================
+# TAB 5.6 — Organgruppen Regeln
+# ===========================================================================
+
+elif page == "🏥 Organgruppen Regeln":
     
     og_rules = load_og_rules()
     
@@ -1409,16 +1542,16 @@ with tab_organgruppen:
     
     st.divider()
     
-    # Section 1b: OG Weights
-    st.markdown("### OG-Gewichtung für Zuteilungs-Counter")
+    # Section 1b: OG Weights for OAs
+    st.markdown("### OG-Gewichtung für OAs (Oberärzte)")
     st.caption("Gewichtung zwischen 0.1 und 1.0. Niedrigere Werte erlauben mehr Zuweisungen pro Person. "
               "Beispiel: 0.4 ermöglicht 2 Zuweisungen (0.4 + 0.4 = 0.8 ≤ 1.0), 0.6 ermöglicht max. 1 Zuweisung.")
     
-    og_weights = og_rules.get("og_weights", {})
+    og_weights_oa = og_rules.get("og_weights_oa", og_rules.get("og_weights", {}))
     
     # Display in 2 columns
     col1, col2 = st.columns(2)
-    updated_weights = {}
+    updated_weights_oa = {}
     
     for i, og in enumerate(OG_LIST_NO_LAUFEN):
         col = col1 if i % 2 == 0 else col2
@@ -1429,22 +1562,57 @@ with tab_organgruppen:
                 og,
                 min_value=0.1,
                 max_value=1.0,
-                value=og_weights.get(og, default),
+                value=og_weights_oa.get(og, default),
                 step=0.1,
                 format="%.1f",
-                key=f"og_weight_{og}"
+                key=f"og_weight_oa_{og}"
             )
-            updated_weights[og] = weight
+            updated_weights_oa[og] = weight
     
-    if st.button("OG-Gewichtungen speichern", type="primary", key="save_og_weights"):
-        og_rules["og_weights"] = updated_weights
+    if st.button("OG-Gewichtungen für OAs speichern", type="primary", key="save_og_weights_oa"):
+        og_rules["og_weights_oa"] = updated_weights_oa
         save_og_rules(og_rules)
-        st.success("OG-Gewichtungen gespeichert!")
+        st.success("OG-Gewichtungen für OAs gespeichert!")
         st.rerun()
     
     st.divider()
     
-    # Section 1c: Max FAs and Max AAs
+    # Section 1c: OG Weights for AAs
+    st.markdown("### OG-Gewichtung für AAs (Assistenzärzte)")
+    st.caption("Gewichtung zwischen 0.1 und 1.0. Niedrigere Werte erlauben mehr Zuweisungen pro Person. "
+              "Beispiel: 0.4 ermöglicht 2 Zuweisungen (0.4 + 0.4 = 0.8 ≤ 1.0), 0.6 ermöglicht max. 1 Zuweisung.")
+    
+    og_weights_aa = og_rules.get("og_weights_aa", og_rules.get("og_weights", {}))
+    
+    # Display in 2 columns
+    col1, col2 = st.columns(2)
+    updated_weights_aa = {}
+    
+    for i, og in enumerate(OG_LIST_NO_LAUFEN):
+        col = col1 if i % 2 == 0 else col2
+        
+        default = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
+        with col:
+            weight = st.number_input(
+                og,
+                min_value=0.1,
+                max_value=1.0,
+                value=og_weights_aa.get(og, default),
+                step=0.1,
+                format="%.1f",
+                key=f"og_weight_aa_{og}"
+            )
+            updated_weights_aa[og] = weight
+    
+    if st.button("OG-Gewichtungen für AAs speichern", type="primary", key="save_og_weights_aa"):
+        og_rules["og_weights_aa"] = updated_weights_aa
+        save_og_rules(og_rules)
+        st.success("OG-Gewichtungen für AAs gespeichert!")
+        st.rerun()
+    
+    st.divider()
+    
+    # Section 1d: Max FAs and Max AAs
     st.markdown("### Maximum FAs und AAs pro OG")
     st.caption("Legt fest, wie viele FAs/AAs maximal pro Tag in eine OG zugewiesen werden. "
               "0 = kein Limit. Verhindert, dass niedrig-gewichtete OGs (0.4) immer vollständig gefüllt werden.")
@@ -1558,7 +1726,7 @@ with tab_organgruppen:
 # TAB 6 — Radiologe in Laufen
 # ===========================================================================
 
-with tab_laufen:
+elif page == "🏃 Laufen":
     st.subheader("Radiologe in Laufen")
     st.caption("Konfiguration für den Standort Laufen.")
 

@@ -41,29 +41,44 @@ LA = "LA"   # Leitender Arzt
 # Laufen enabled weekdays (tweakable)
 LAUFEN_DAYS: Set[str] = {"Dienstag"}
 
-OG_LIST = [
-    "MSK","Neuro","Onko","Thorax","Abdomen","Mammo","Intervention/ Vaskulär","Nuklearmedizin","Laufen"
-]
 WEEKDAYS = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag"]
 
-# OG special rules — loaded from og_rules.json (edit via Streamlit UI)
+# OG special rules — loaded from og_rules.json and organgruppen.json (edit via Streamlit UI)
 def _load_og_rules():
     _path = Path(__file__).parent / "og_rules.json"
     with open(_path, encoding="utf-8") as _f:
         _r = json.load(_f)
     
-    global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION, OG_WEIGHTS, OG_MAX_FAS, OG_MAX_AAS
-    OG_PRIORITY_ORDER = _r.get("og_priority_order", OG_LIST)
+    # Load OG list from organgruppen.json
+    _og_path = Path(__file__).parent / "organgruppen.json"
+    global OG_LIST_NO_LAUFEN, OG_LIST
+    if _og_path.exists():
+        with open(_og_path, encoding="utf-8") as _og_f:
+            _og_data = json.load(_og_f)
+            OG_LIST_NO_LAUFEN = _og_data.get("organgruppen", [])
+            OG_LIST = OG_LIST_NO_LAUFEN + ["Laufen"]  # Laufen always present
+    else:
+        # Fallback to hardcoded list if file doesn't exist
+        OG_LIST_NO_LAUFEN = ["MSK", "Neuro", "Onko", "Thorax", "Abdomen", "Mammo", "Intervention/ Vaskulär", "Nuklearmedizin"]
+        OG_LIST = OG_LIST_NO_LAUFEN + ["Laufen"]
+    
+    global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION, OG_WEIGHTS_OA, OG_WEIGHTS_AA, OG_MAX_FAS, OG_MAX_AAS
+    OG_PRIORITY_ORDER = _r.get("og_priority_order", OG_LIST_NO_LAUFEN)
     USE_RANDOM_OG_SELECTION = _r.get("use_random_og_selection", False)
-    OG_WEIGHTS = _r.get("og_weights", {})
+    
+    # Load separate OA and AA weights
+    OG_WEIGHTS_OA = _r.get("og_weights_oa", _r.get("og_weights", {}))  # Fallback to old og_weights if needed
+    OG_WEIGHTS_AA = _r.get("og_weights_aa", _r.get("og_weights", {}))
+    
     OG_MAX_FAS = _r.get("og_max_fas", {})
     OG_MAX_AAS = _r.get("og_max_aas", {})
     
     # Set defaults for any missing OGs
     for og in OG_LIST:
-        if og not in OG_WEIGHTS:
-            # Default: Mammo and Intervention get 0.4, others get 0.6
-            OG_WEIGHTS[og] = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
+        if og not in OG_WEIGHTS_OA:
+            OG_WEIGHTS_OA[og] = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
+        if og not in OG_WEIGHTS_AA:
+            OG_WEIGHTS_AA[og] = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
         if og not in OG_MAX_FAS:
             OG_MAX_FAS[og] = None  # No limit
         if og not in OG_MAX_AAS:
@@ -76,15 +91,18 @@ def _load_og_rules():
         set(_r.get("warn_kein_fa_site", [])),
     )
 
+# OG Lists - will be populated from organgruppen.json
+OG_LIST_NO_LAUFEN: List[str] = []
+OG_LIST: List[str] = []
+
 OG_PRIORITY_ORDER: List[str] = []
 USE_RANDOM_OG_SELECTION: bool = False
-OG_WEIGHTS: Dict[str, float] = {}
+OG_WEIGHTS_OA: Dict[str, float] = {}
+OG_WEIGHTS_AA: Dict[str, float] = {}
 OG_MAX_FAS: Dict[str, Optional[int]] = {}
 OG_MAX_AAS: Dict[str, Optional[int]] = {}
 OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
 OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}  # Laufen always skipped
-
-# Non-leader OGs (exclude Laufen)
 OG_LIST_NONLEADER = [og for og in OG_LIST if og != "Laufen"]
 
 
@@ -308,10 +326,11 @@ load_meeting_pools_from_json(_pools_json)
 
 
 def reload_og_rules() -> None:
-    """Reload OG special rules from og_rules.json — call after saving via UI."""
-    global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA
+    """Reload OG special rules from og_rules.json and organgruppen.json — call after saving via UI."""
+    global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA, OG_LIST_NONLEADER
     OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
     OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}
+    OG_LIST_NONLEADER = [og for og in OG_LIST if og != "Laufen"]
 
 
 def _clear_cells(ws: Worksheet, cells: Tuple[str, ...]):
@@ -733,7 +752,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             staff_by_name[name].og_nonleader_count = 0
         
         # Pool: All OAs with counter that can still fit smallest weight
-        min_weight = min(OG_WEIGHTS.values()) if OG_WEIGHTS else 0.6
+        min_weight = min(OG_WEIGHTS_OA.values()) if OG_WEIGHTS_OA else 0.6
         pool = set(present_oas)
         
         while pool:
@@ -749,7 +768,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             # 2. For each OG: Find compatible persons (counter + weight <= 1.0 AND not already in this OG)
             og_candidates = {}
             for og in available_ogs:
-                og_weight = OG_WEIGHTS.get(og, 0.6)
+                og_weight = OG_WEIGHTS_OA.get(og, 0.6)
                 compatible = [n for n in pool 
                             if staff_by_name[n].og_nonleader_count + og_weight <= 1.0
                             and not _already_listed(ws, OG_CELLS[og][day], n)]
@@ -806,7 +825,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             _place_in_og(ws, day, chosen_og, pick, count_for_fa=True)
             
             # 8. Update counter
-            og_weight = OG_WEIGHTS.get(chosen_og, 0.6)
+            og_weight = OG_WEIGHTS_OA.get(chosen_og, 0.6)
             staff_by_name[pick].og_nonleader_count += og_weight
             
             # 9. Remove from pool if can't fit any more OGs
@@ -834,7 +853,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             
             og_candidates = {}
             for og in available_ogs:
-                og_weight = OG_WEIGHTS.get(og, 0.6)
+                og_weight = OG_WEIGHTS_AA.get(og, 0.6)
                 compatible = [n for n in pool 
                             if staff_by_name[n].aa_og_count + og_weight <= 1.0
                             and not _already_listed(ws, OG_CELLS[og][day], n)]
@@ -882,7 +901,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             
             _place_in_og(ws, day, chosen_og, pick, count_for_fa=False)
             
-            og_weight = OG_WEIGHTS.get(chosen_og, 0.6)
+            og_weight = OG_WEIGHTS_AA.get(chosen_og, 0.6)
             staff_by_name[pick].aa_og_count += og_weight
             
             if staff_by_name[pick].aa_og_count + min_weight > 1.0:

@@ -1,0 +1,13 @@
+{
+  "_comment": "List of all Organgruppen. Laufen is always present (special case) and not included here. Edit via Organgruppen Verwalten tab.",
+  "organgruppen": [
+    "MSK",
+    "Neuro",
+    "Onko",
+    "Thorax",
+    "Abdomen",
+    "Mammo",
+    "Intervention/ Vaskulär",
+    "Nuklearmedizin"
+  ]
+}
