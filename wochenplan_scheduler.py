@@ -52,16 +52,22 @@ def _load_og_rules():
     with open(_path, encoding="utf-8") as _f:
         _r = json.load(_f)
     
-    global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION, OG_WEIGHTS
+    global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION, OG_WEIGHTS, OG_MAX_FAS, OG_MAX_AAS
     OG_PRIORITY_ORDER = _r.get("og_priority_order", OG_LIST)
     USE_RANDOM_OG_SELECTION = _r.get("use_random_og_selection", False)
     OG_WEIGHTS = _r.get("og_weights", {})
+    OG_MAX_FAS = _r.get("og_max_fas", {})
+    OG_MAX_AAS = _r.get("og_max_aas", {})
     
     # Set defaults for any missing OGs
     for og in OG_LIST:
         if og not in OG_WEIGHTS:
             # Default: Mammo and Intervention get 0.4, others get 0.6
             OG_WEIGHTS[og] = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
+        if og not in OG_MAX_FAS:
+            OG_MAX_FAS[og] = None  # No limit
+        if og not in OG_MAX_AAS:
+            OG_MAX_AAS[og] = None  # No limit
     
     return (
         set(_r.get("rotation_or_leader_only", [])),
@@ -73,6 +79,8 @@ def _load_og_rules():
 OG_PRIORITY_ORDER: List[str] = []
 USE_RANDOM_OG_SELECTION: bool = False
 OG_WEIGHTS: Dict[str, float] = {}
+OG_MAX_FAS: Dict[str, Optional[int]] = {}
+OG_MAX_AAS: Dict[str, Optional[int]] = {}
 OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
 OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}  # Laufen always skipped
 
@@ -616,9 +624,13 @@ def assign_fr_shifts_to_cells(
 # ---------------- OG assignment ----------------
 
 FA_COUNTS: Dict[str, Dict[str,int]] = {d:{og:0 for og in OG_LIST} for d in WEEKDAYS}
+AA_COUNTS: Dict[str, Dict[str,int]] = {d:{og:0 for og in OG_LIST} for d in WEEKDAYS}
+
 def reset_og_counts():
     for d in WEEKDAYS:
-        for og in OG_LIST: FA_COUNTS[d][og]=0
+        for og in OG_LIST: 
+            FA_COUNTS[d][og]=0
+            AA_COUNTS[d][og]=0
 
 def _first_empty_cell(ws: Worksheet, cells: Tuple[str,...]) -> Optional[str]:
     for a1 in cells:
@@ -694,6 +706,8 @@ def _place_in_og(ws: Worksheet, day: str, og: str, name: str, count_for_fa: bool
     # in assign_nonleaders_to_ogs, not here
     if count_for_fa and s and s.role==OA:
         FA_COUNTS[day][og] += 1
+    if not count_for_fa and s and s.role==AA:
+        AA_COUNTS[day][og] += 1
     return True
 
 def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]], rng: random.Random) -> Dict[str,Dict[str,int]]:
@@ -723,10 +737,11 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
         pool = set(present_oas)
         
         while pool:
-            # 1. Find OGs with free slots
+            # 1. Find OGs with free slots and under max_fas limit
             available_ogs = [og for og in OG_LIST_NONLEADER 
                            if og not in OG_ROTATION_OR_LEADER_ONLY
-                           and _first_empty_cell(ws, OG_CELLS[og][day]) is not None]
+                           and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
+                           and (OG_MAX_FAS.get(og) is None or FA_COUNTS[day][og] < OG_MAX_FAS[og])]
             
             if not available_ogs:
                 break  # No free slots
@@ -808,10 +823,11 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
         pool = set(present_aas)
         
         while pool:
-            # Same logic as OAs, but using aa_og_count instead
+            # Same logic as OAs, but using aa_og_count and checking max_aas
             available_ogs = [og for og in OG_LIST_NONLEADER 
                            if og not in OG_ROTATION_OR_LEADER_ONLY
-                           and _first_empty_cell(ws, OG_CELLS[og][day]) is not None]
+                           and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
+                           and (OG_MAX_AAS.get(og) is None or AA_COUNTS[day][og] < OG_MAX_AAS[og])]
             
             if not available_ogs:
                 break
@@ -839,8 +855,8 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             else:
                 eligible_ogs = list(og_candidates.keys())
             
-            minv = min(FA_COUNTS[day][og] for og in eligible_ogs)
-            bucket = [og for og in eligible_ogs if FA_COUNTS[day][og] == minv]
+            minv = min(AA_COUNTS[day][og] for og in eligible_ogs)
+            bucket = [og for og in eligible_ogs if AA_COUNTS[day][og] == minv]
             
             if USE_RANDOM_OG_SELECTION:
                 chosen_og = rng.choice(bucket)

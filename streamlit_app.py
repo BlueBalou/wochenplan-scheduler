@@ -1361,8 +1361,6 @@ with tab_pools:
 # ===========================================================================
 
 with tab_organgruppen:
-    st.subheader("Organgruppen-Verwaltung")
-    st.caption("Konfiguration für Organgruppen-Zuteilung und Sonderregeln")
     
     og_rules = load_og_rules()
     
@@ -1442,6 +1440,58 @@ with tab_organgruppen:
         og_rules["og_weights"] = updated_weights
         save_og_rules(og_rules)
         st.success("OG-Gewichtungen gespeichert!")
+        st.rerun()
+    
+    st.divider()
+    
+    # Section 1c: Max FAs and Max AAs
+    st.markdown("### Maximum FAs und AAs pro OG")
+    st.caption("Legt fest, wie viele FAs/AAs maximal pro Tag in eine OG zugewiesen werden. "
+              "0 = kein Limit. Verhindert, dass niedrig-gewichtete OGs (0.4) immer vollständig gefüllt werden.")
+    
+    og_max_fas = og_rules.get("og_max_fas", {})
+    og_max_aas = og_rules.get("og_max_aas", {})
+    
+    # Display in 3 columns: OG name, Max FAs, Max AAs
+    st.markdown("**OG | Max FAs | Max AAs**")
+    updated_max_fas = {}
+    updated_max_aas = {}
+    
+    for og in OG_LIST_NO_LAUFEN:
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
+        with col1:
+            st.markdown(f"**{og}**")
+        
+        with col2:
+            max_fa = st.number_input(
+                "Max FAs",
+                min_value=0,
+                max_value=10,
+                value=og_max_fas.get(og) if og_max_fas.get(og) is not None else 0,
+                step=1,
+                key=f"og_max_fa_{og}",
+                label_visibility="collapsed"
+            )
+            updated_max_fas[og] = max_fa if max_fa > 0 else None
+        
+        with col3:
+            max_aa = st.number_input(
+                "Max AAs",
+                min_value=0,
+                max_value=10,
+                value=og_max_aas.get(og) if og_max_aas.get(og) is not None else 0,
+                step=1,
+                key=f"og_max_aa_{og}",
+                label_visibility="collapsed"
+            )
+            updated_max_aas[og] = max_aa if max_aa > 0 else None
+    
+    if st.button("Max FAs/AAs speichern", type="primary", key="save_og_maxs"):
+        og_rules["og_max_fas"] = updated_max_fas
+        og_rules["og_max_aas"] = updated_max_aas
+        save_og_rules(og_rules)
+        st.success("Maximum FAs/AAs gespeichert!")
         st.rerun()
     
     st.divider()
