@@ -3,12 +3,12 @@
 Wochenplan Scheduler (pipeline: OG leaders → OG non-leaders → FR → Meetings)
 
 - OG leaders (LA) → assigned to ALL of their dedicated OGs when present
-  (includes Laufen; H.W. Ott leads Neuro & Laufen; Laufen active days = LAUFEN_DAYS)
+  (includes Laufen; H.W. Ott leads Neuro & Laufen; active days defined by layout.json cells)
 
 - OG non-leaders (FAs & AAs) → rotations first, then balance; coverage flags:
     • WENIGER ALS 2FA for MSK/Neuro/Onko/Thorax/Abdomen if total FAs < 2
     • KEIN FA IN BH / KEIN FA IN LI only for MSK & Abdomen (suppressed if < 2 FA flagged)
-    • KEIN AA for all OGs except Nuklearmedizin & Laufen
+    • KEIN AA for all OGs except those in og_rules.json (rotation_or_leader_only)
 
 - FR (Frontarzt) AFTER OGs
     • FR-only absences overlay includes that day’s Laufen assignees
@@ -38,9 +38,6 @@ AA = "AA"   # Assistenzarzt
 OA = "OA"   # Oberarzt
 LA = "LA"   # Leitender Arzt
 
-# Laufen enabled weekdays (tweakable)
-LAUFEN_DAYS: Set[str] = {"Dienstag"}
-
 WEEKDAYS = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag"]
 
 # OG special rules — loaded from og_rules.json and organgruppen.json (edit via Streamlit UI)
@@ -56,11 +53,11 @@ def _load_og_rules():
         with open(_og_path, encoding="utf-8") as _og_f:
             _og_data = json.load(_og_f)
             OG_LIST_NO_LAUFEN = _og_data.get("organgruppen", [])
-            OG_LIST = OG_LIST_NO_LAUFEN + ["Laufen"]  # Laufen always present
+            OG_LIST = OG_LIST_NO_LAUFEN  # No special Laufen handling
     else:
         # Fallback to hardcoded list if file doesn't exist
-        OG_LIST_NO_LAUFEN = ["MSK", "Neuro", "Onko", "Thorax", "Abdomen", "Mammo", "Intervention/ Vaskulär", "Nuklearmedizin"]
-        OG_LIST = OG_LIST_NO_LAUFEN + ["Laufen"]
+        OG_LIST_NO_LAUFEN = ["MSK", "Neuro", "Onko", "Thorax", "Abdomen", "Mammo", "Intervention/ Vaskulär", "Nuklearmedizin", "Laufen"]
+        OG_LIST = OG_LIST_NO_LAUFEN
     
     global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION, OG_WEIGHTS_OA, OG_WEIGHTS_AA, OG_MAX_FAS, OG_MAX_AAS
     OG_PRIORITY_ORDER = _r.get("og_priority_order", OG_LIST_NO_LAUFEN)
@@ -102,8 +99,7 @@ OG_WEIGHTS_AA: Dict[str, float] = {}
 OG_MAX_FAS: Dict[str, Optional[int]] = {}
 OG_MAX_AAS: Dict[str, Optional[int]] = {}
 OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
-OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}  # Laufen always skipped
-OG_LIST_NONLEADER = [og for og in OG_LIST if og != "Laufen"]
+OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
 
 
 
@@ -327,10 +323,9 @@ load_meeting_pools_from_json(_pools_json)
 
 def reload_og_rules() -> None:
     """Reload OG special rules from og_rules.json and organgruppen.json — call after saving via UI."""
-    global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA, OG_LIST_NONLEADER
+    global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA
     OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
-    OGS_SKIP_KEIN_AA = (set(OG_LIST) - OG_WARN_KEIN_AA) | {"Laufen"}
-    OG_LIST_NONLEADER = [og for og in OG_LIST if og != "Laufen"]
+    OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
 
 
 def _clear_cells(ws: Worksheet, cells: Tuple[str, ...]):
@@ -504,17 +499,15 @@ def print_weekly_stats():
 
 # ---------------- FR (Frontarzt) ----------------
 
-def read_laufen_by_day(ws: Worksheet, allowed_days: Optional[Set[str]] = None) -> Dict[str, Set[str]]:
+def get_persons_assigned_to_laufen(ws: Worksheet) -> Dict[str, Set[str]]:
     """
     Read names listed in the Laufen OG cells.
-    If allowed_days is provided, only those weekdays are considered.
     Returns: {weekday -> set(names)}
     """
     out: Dict[str, Set[str]] = {d: set() for d in WEEKDAYS}
-    days = WEEKDAYS if allowed_days is None else [d for d in WEEKDAYS if d in allowed_days]
 
     cells_map = OG_CELLS.get("Laufen", {})
-    for day in days:
+    for day in WEEKDAYS:
         cells = cells_map.get(day, tuple())
         # Defensive: coerce single strings to tuples if someone edits accidentally
         if isinstance(cells, str):
@@ -535,7 +528,7 @@ def absences_for_fr_stage(ws: Worksheet, absences_orig: Dict[str, Set[str]],
     abs_fr = {d: set(absences_orig.get(d, set())) for d in WEEKDAYS}
 
     if include_laufen_from_og:
-        laufen = read_laufen_by_day(ws, allowed_days=LAUFEN_DAYS)
+        laufen = get_persons_assigned_to_laufen(ws)
         for d in WEEKDAYS:
             abs_fr[d].update(laufen.get(d, set()))
 
@@ -665,8 +658,8 @@ def _already_listed(ws: Worksheet, cells: Tuple[str,...], name: str) -> bool:
 
 def assign_la_to_ogs(ws: Worksheet, absences_by_day: Dict[str, Set[str]]) -> Dict[str, Dict[str, int]]:
     """
-    Assign every present LA to all of their dedicated OGs (no prioritization),
-    skipping 'Laufen' on days not in LAUFEN_DAYS.
+    Assign every present LA to all of their dedicated OGs (no prioritization).
+    OGs without cells for a day are skipped automatically.
     """
     reset_og_counts()
 
@@ -676,8 +669,6 @@ def assign_la_to_ogs(ws: Worksheet, absences_by_day: Dict[str, Set[str]]) -> Dic
         abs_today = absences_by_day.get(day, set())
 
         for og in OG_LIST:
-            if og == "Laufen" and day not in LAUFEN_DAYS:
-                continue
             cells = OG_CELLS[og][day]
             if not cells:
                 continue
@@ -757,7 +748,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
         
         while pool:
             # 1. Find OGs with free slots and under max_fas limit
-            available_ogs = [og for og in OG_LIST_NONLEADER 
+            available_ogs = [og for og in OG_LIST 
                            if og not in OG_ROTATION_OR_LEADER_ONLY
                            and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
                            and (OG_MAX_FAS.get(og) is None or FA_COUNTS[day][og] < OG_MAX_FAS[og])]
@@ -843,7 +834,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
         
         while pool:
             # Same logic as OAs, but using aa_og_count and checking max_aas
-            available_ogs = [og for og in OG_LIST_NONLEADER 
+            available_ogs = [og for og in OG_LIST 
                            if og not in OG_ROTATION_OR_LEADER_ONLY
                            and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
                            and (OG_MAX_AAS.get(og) is None or AA_COUNTS[day][og] < OG_MAX_AAS[og])]
@@ -1068,7 +1059,7 @@ def assign_meeting_by_pools(
 def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Random):
     write_medizin_placeholders_monday(ws)
 
-    laufen_by_day = read_laufen_by_day(ws)
+    laufen_by_day = get_persons_assigned_to_laufen(ws)
     spaet         = read_spaetdienst_by_day(ws)
 
     # Iterate over all meetings defined in meeting_pools.json

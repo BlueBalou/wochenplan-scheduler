@@ -23,7 +23,6 @@ STAFF_JSON  = Path(__file__).parent / "staff.json"
 LAYOUT_JSON = Path(__file__).parent / "layout.json"
 MEETING_POOLS_JSON = Path(__file__).parent / "meeting_pools.json"
 TEMPLATE_XLSM = Path(__file__).parent / "KW_xx_TEMPLATE.xlsm"
-OG_LIST_NO_LAUFEN = [og for og in sched.OG_LIST if og != "Laufen"]
 ALL_WEEKDAYS = sched.WEEKDAYS  # ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag"]
 
 # Pool constants
@@ -413,7 +412,7 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
         )
         rots = c5.multiselect(
             "Rotationen",
-            options=OG_LIST_NO_LAUFEN,
+            options=sched.OG_LIST,
             default=sorted(d.get("rotations", [])),
         )
 
@@ -469,13 +468,11 @@ page = st.sidebar.radio(
     [
         "📋 Wochenplan (Standard)",
         "📄 Wochenplan (Eigene Vorlage)", 
-        "📅 Feiertage",
         "👥 Personalverwaltung",
         "📊 Rapporte verwalten",
         "📊 Rapporte-Pools",
         "🏥 Organgruppen Verwalten",
         "🏥 Organgruppen Regeln",
-        "🏃 Laufen",
         "🔧 Layout-Editor"
     ],
     label_visibility="collapsed"
@@ -529,10 +526,6 @@ if page == "📋 Wochenplan (Standard)":
                 output_tmp_path = f_out.name
             
             with st.spinner("Pipeline läuft…"):
-                # Configure Laufen days
-                laufen_days = st.session_state.get("laufen_days", ["Dienstag"])
-                sched.LAUFEN_DAYS.clear()
-                sched.LAUFEN_DAYS.update(laufen_days)
                 
                 # Reset counters
                 sched.reset_all_counters()
@@ -621,6 +614,29 @@ if page == "📋 Wochenplan (Standard)":
                 except Exception as e:
                     st.error(f"Fehler beim Ersetzen: {e}")
 
+    # Feiertage section
+    st.divider()
+    st.markdown("### 🎉 Feiertage")
+    st.caption("Wähle Wochentage, die als Feiertage behandelt werden sollen (keine Absenzen, OG, FR, Rapporte).")
+    
+    # Load current feiertage from layout
+    layout_feiertage = load_layout()
+    current_feiertage = layout_feiertage.get("feiertage", [])
+    
+    feiertage_selected = st.multiselect(
+        "Feiertage",
+        options=["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"],
+        default=current_feiertage,
+        help="An diesen Tagen werden nur Nacht-, Hintergrund- und Vordergrunddienste eingeplant.",
+        key="feiertage_select_standard"
+    )
+    
+    if st.button("Feiertage speichern", type="primary", key="save_feiertage_standard"):
+        layout_feiertage["feiertage"] = feiertage_selected
+        save_layout(layout_feiertage)
+        st.success(f"✓ Feiertage gespeichert: {', '.join(feiertage_selected) if feiertage_selected else 'Keine'}")
+        st.rerun()
+
     
     
 # ===========================================================================
@@ -679,10 +695,6 @@ elif page == "📄 Wochenplan (Eigene Vorlage)":
             
             with st.spinner("Pipeline läuft…"):
                 # Configure Laufen days
-                laufen_days = st.session_state.get("laufen_days", ["Dienstag"])
-                sched.LAUFEN_DAYS.clear()
-                sched.LAUFEN_DAYS.update(laufen_days)
-                
                 # Reset counters
                 sched.reset_all_counters()
                 
@@ -747,31 +759,28 @@ elif page == "📄 Wochenplan (Eigene Vorlage)":
                 os.unlink(template_tmp_path)
             if output_tmp_path and os.path.exists(output_tmp_path):
                 os.unlink(output_tmp_path)
-
-# ===========================================================================
-# TAB 3 — Feiertage
-# ===========================================================================
-elif page == "📅 Feiertage":
-
+    
+    # Feiertage section
+    st.divider()
     st.markdown("### 🎉 Feiertage")
     st.caption("Wähle Wochentage, die als Feiertage behandelt werden sollen (keine Absenzen, OG, FR, Rapporte).")
     
     # Load current feiertage from layout
-    layout = load_layout()
-    current_feiertage = layout.get("feiertage", [])
+    layout_feiertage_eigene = load_layout()
+    current_feiertage_eigene = layout_feiertage_eigene.get("feiertage", [])
     
-    feiertage_selected = st.multiselect(
+    feiertage_selected_eigene = st.multiselect(
         "Feiertage",
         options=["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"],
-        default=current_feiertage,
+        default=current_feiertage_eigene,
         help="An diesen Tagen werden nur Nacht-, Hintergrund- und Vordergrunddienste eingeplant.",
-        key="feiertage_select"
+        key="feiertage_select_eigene"
     )
     
-    if st.button("Feiertage speichern", type="primary", key="save_feiertage_btn"):
-        layout["feiertage"] = feiertage_selected
-        save_layout(layout)
-        st.success(f"✓ Feiertage gespeichert: {', '.join(feiertage_selected) if feiertage_selected else 'Keine'}")
+    if st.button("Feiertage speichern", type="primary", key="save_feiertage_eigene"):
+        layout_feiertage_eigene["feiertage"] = feiertage_selected_eigene
+        save_layout(layout_feiertage_eigene)
+        st.success(f"✓ Feiertage gespeichert: {', '.join(feiertage_selected_eigene) if feiertage_selected_eigene else 'Keine'}")
         st.rerun()
 
 # ===========================================================================
@@ -1375,6 +1384,7 @@ elif page == "📊 Rapporte-Pools":
             save_meeting_pools(pools_data)
             st.success("Rapporte-Pools gespeichert und neu geladen.")
             st.rerun()
+    
 
 
 # ===========================================================================
@@ -1387,7 +1397,7 @@ elif page == "📊 Rapporte-Pools":
 
 elif page == "🏥 Organgruppen Verwalten":
     st.subheader("Organgruppen verwalten")
-    st.caption("Hinzufügen oder Entfernen von Organgruppen. Laufen ist eine spezielle OG und wird immer angezeigt.")
+    st.caption("Hinzufügen oder Entfernen von Organgruppen.")
     
     # Load current OGs
     og_file = Path(sched._staff_json).parent / "organgruppen.json"
@@ -1465,8 +1475,6 @@ elif page == "🏥 Organgruppen Verwalten":
                 st.error("Bitte geben Sie einen Namen ein.")
             elif new_og_name.strip() in current_ogs:
                 st.error(f"'{new_og_name.strip()}' existiert bereits.")
-            elif new_og_name.strip() == "Laufen":
-                st.error("'Laufen' ist eine spezielle OG und kann nicht manuell hinzugefügt werden.")
             else:
                 # Add to organgruppen.json
                 current_ogs.append(new_og_name.strip())
@@ -1501,10 +1509,10 @@ elif page == "🏥 Organgruppen Regeln":
     st.markdown("### Organgruppen-Priorität")
     st.caption("Reihenfolge bei gleicher Auslastung (oben = höchste Priorität). Diese Reihenfolge gilt nur wenn 'Zufällige Zuteilung' deaktiviert ist.")
     
-    current_order = og_rules.get("og_priority_order", OG_LIST_NO_LAUFEN)
+    current_order = og_rules.get("og_priority_order", sched.OG_LIST)
     
     # Ensure all OGs are in the list
-    for og in OG_LIST_NO_LAUFEN:
+    for og in sched.OG_LIST:
         if og not in current_order:
             current_order.append(og)
     
@@ -1553,7 +1561,7 @@ elif page == "🏥 Organgruppen Regeln":
     col1, col2 = st.columns(2)
     updated_weights_oa = {}
     
-    for i, og in enumerate(OG_LIST_NO_LAUFEN):
+    for i, og in enumerate(sched.OG_LIST):
         col = col1 if i % 2 == 0 else col2
         
         default = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
@@ -1588,7 +1596,7 @@ elif page == "🏥 Organgruppen Regeln":
     col1, col2 = st.columns(2)
     updated_weights_aa = {}
     
-    for i, og in enumerate(OG_LIST_NO_LAUFEN):
+    for i, og in enumerate(sched.OG_LIST):
         col = col1 if i % 2 == 0 else col2
         
         default = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
@@ -1625,7 +1633,7 @@ elif page == "🏥 Organgruppen Regeln":
     updated_max_fas = {}
     updated_max_aas = {}
     
-    for og in OG_LIST_NO_LAUFEN:
+    for og in sched.OG_LIST:
         col1, col2, col3 = st.columns([2, 1, 1])
         
         with col1:
@@ -1675,8 +1683,8 @@ elif page == "🏥 Organgruppen Regeln":
         st.caption("OGs die nur an Personen mit Rotation oder Leader zugeteilt werden")
         rotation_only = st.multiselect(
             "Organgruppen",
-            options=OG_LIST_NO_LAUFEN,
-            default=sorted(og_rules.get("rotation_or_leader_only", [])),
+            options=sched.OG_LIST,
+            default=sorted([og for og in og_rules.get("rotation_or_leader_only", []) if og != "Laufen"]),
             key="rotation_only_select",
             label_visibility="collapsed"
         )
@@ -1685,7 +1693,7 @@ elif page == "🏥 Organgruppen Regeln":
         st.caption("OGs die 'WENIGER ALS 2FA' anzeigen wenn < 2 Fachärzte")
         warn_2fa = st.multiselect(
             "Organgruppen",
-            options=OG_LIST_NO_LAUFEN,
+            options=sched.OG_LIST,
             default=sorted(og_rules.get("warn_weniger_als_2fa", [])),
             key="warn_2fa_select",
             label_visibility="collapsed"
@@ -1696,7 +1704,7 @@ elif page == "🏥 Organgruppen Regeln":
         st.caption("OGs die 'KEIN AA' anzeigen wenn kein Assistenzarzt zugeteilt")
         warn_aa = st.multiselect(
             "Organgruppen",
-            options=OG_LIST_NO_LAUFEN,
+            options=sched.OG_LIST,
             default=sorted(og_rules.get("warn_kein_aa", [])),
             key="warn_aa_select",
             label_visibility="collapsed"
@@ -1706,9 +1714,19 @@ elif page == "🏥 Organgruppen Regeln":
         st.caption("OGs die 'KEIN FA IN BH/LI' anzeigen wenn keine FAs vom jeweiligen Standort")
         warn_site = st.multiselect(
             "Organgruppen",
-            options=OG_LIST_NO_LAUFEN,
+            options=sched.OG_LIST,
             default=sorted(og_rules.get("warn_kein_fa_site", [])),
             key="warn_site_select",
+            label_visibility="collapsed"
+        )
+        
+        st.markdown("**Von Rapporten ausschließen**")
+        st.caption("OGs die nie in Rapporte-Pools zugewiesen werden")
+        exclude_rapporte = st.multiselect(
+            "Organgruppen",
+            options=sched.OG_LIST,
+            default=sorted(og_rules.get("exclude_from_rapporte", [])),
+            key="exclude_rapporte_select",
             label_visibility="collapsed"
         )
     
@@ -1717,6 +1735,7 @@ elif page == "🏥 Organgruppen Regeln":
         og_rules["warn_kein_aa"] = warn_aa
         og_rules["warn_weniger_als_2fa"] = warn_2fa
         og_rules["warn_kein_fa_site"] = warn_site
+        og_rules["exclude_from_rapporte"] = exclude_rapporte
         save_og_rules(og_rules)
         st.success("Organgruppen-Sonderregeln gespeichert!")
         st.rerun()
@@ -1726,43 +1745,5 @@ elif page == "🏥 Organgruppen Regeln":
 # TAB 6 — Radiologe in Laufen
 # ===========================================================================
 
-elif page == "🏃 Laufen":
-    st.subheader("Radiologe in Laufen")
-    st.caption("Konfiguration für den Standort Laufen.")
-
-    laufen_days = st.multiselect(
-        "Radiologe in Laufen anwesend",
-        options=ALL_WEEKDAYS,
-        default=list(sched.LAUFEN_DAYS),
-        help="Wochentage, an denen 'Laufen' besetzt wird (OG-Leader Neuro/Laufen).",
-        key="laufen_days_select"
-    )
-    st.session_state["laufen_days"] = laufen_days
-
-    # Derive current global exclude_laufen from first pool of first rapport
-    _pools_data_laufen = load_meeting_pools()
-    _first_cfg = next(iter(_pools_data_laufen.values()), {})
-    _first_pool = (_first_cfg.get("pools") or [{}])[0]
-    _current_excl = _first_pool.get("exclude_laufen", False)
-
-    global_exclude_laufen = st.checkbox(
-        "Laufen von allen Rapporte-Pools ausschließen",
-        value=st.session_state.get("global_exclude_laufen", _current_excl),
-        help="Schließt den Radiologen in Laufen von der Zuteilung in allen Rapport-Pools aus.",
-        key="global_exclude_laufen",
-    )
-
-    if st.button("Laufen-Einstellungen speichern", type="primary", key="save_laufen_btn"):
-        # Update LAUFEN_DAYS
-        sched.LAUFEN_DAYS.clear()
-        sched.LAUFEN_DAYS.update(laufen_days)
-        # Apply exclude_laufen to all pools in all rapporte
-        _pools_data_laufen = load_meeting_pools()
-        for _cfg in _pools_data_laufen.values():
-            for _pool in _cfg.get("pools", []):
-                _pool["exclude_laufen"] = global_exclude_laufen
-        save_meeting_pools(_pools_data_laufen)
-        st.success("Laufen-Einstellungen gespeichert und auf alle Pools angewendet.")
-        st.rerun()
 
 
