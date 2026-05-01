@@ -560,27 +560,52 @@ def assign_fr_shifts_to_cells(
     for day in WEEKDAYS:
         if day in FEIERTAGE:
             continue  # Skip holidays
-        # BH: unchanged
+        
+        # BH: Process all cells
         used = set()
-        for a1 in FR_CELLS["BH"][day]:
-            pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng)
-            ws[a1].value = pick or ""
+        bh_no_oa_vormittag = SITE_RULES.get("BH", {}).get("no_oa_vormittag", False)
+        
+        if bh_no_oa_vormittag and FR_CELLS["BH"][day]:
+            # First cell: LA only
+            top_cell = FR_CELLS["BH"][day][0]
+            pick, _ = pick_fa_for_fr_shift(day, la_bh, abs_fr, used, rng)
+            ws[top_cell].value = pick or ""
             if pick:
                 used.add(pick)
+            # Remaining cells: all FA
+            for a1 in FR_CELLS["BH"][day][1:]:
+                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng)
+                ws[a1].value = pick or ""
+                if pick:
+                    used.add(pick)
+        else:
+            # All cells: all FA
+            for a1 in FR_CELLS["BH"][day]:
+                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng)
+                ws[a1].value = pick or ""
+                if pick:
+                    used.add(pick)
 
-        # LI: top line = LA only, bottom line = FA/LA as before
+        # LI: Same logic
         used = set()
-        cells_li = FR_CELLS["LI"][day]
-        if cells_li:
-            # First cell (row 32) → only LAs (la_li)
-            top_cell = cells_li[0]
+        li_no_oa_vormittag = SITE_RULES.get("LI", {}).get("no_oa_vormittag", True)
+        
+        if li_no_oa_vormittag and FR_CELLS["LI"][day]:
+            # First cell: LA only
+            top_cell = FR_CELLS["LI"][day][0]
             pick, _ = pick_fa_for_fr_shift(day, la_li, abs_fr, used, rng)
             ws[top_cell].value = pick or ""
             if pick:
                 used.add(pick)
-
-            # Remaining cells (row 33 etc.) → any FR-eligible FA/LA in LI
-            for a1 in cells_li[1:]:
+            # Remaining cells: all FA
+            for a1 in FR_CELLS["LI"][day][1:]:
+                pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng)
+                ws[a1].value = pick or ""
+                if pick:
+                    used.add(pick)
+        else:
+            # All cells: all FA
+            for a1 in FR_CELLS["LI"][day]:
                 pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng)
                 ws[a1].value = pick or ""
                 if pick:
@@ -665,75 +690,189 @@ def _place_in_og(ws: Worksheet, day: str, og: str, name: str, count_for_fa: bool
     if not slot: return False
     ws[slot].value = name
     s = staff_by_name.get(name)
-    if s and s.role!=LA:
-        s.og_nonleader_count += 1
-        if s.role==AA: s.aa_og_count += 1
+    # Note: og_nonleader_count and aa_og_count are now incremented with weights
+    # in assign_nonleaders_to_ogs, not here
     if count_for_fa and s and s.role==OA:
         FA_COUNTS[day][og] += 1
     return True
 
 def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]], rng: random.Random) -> Dict[str,Dict[str,int]]:
+    """
+    Assign non-leader FAs and AAs to OGs using hybrid OG-centric approach with weights.
+    
+    Strategy:
+    1. Reset daily counters for each person
+    2. For OAs: While pool not empty, pick OG with lowest FA_COUNT, assign best matching OA
+    3. For AAs: Same process with separate counter
+    4. Respects OG_WEIGHTS (e.g., 0.4 for Mammo allows 2 assignments, 0.6 allows 1)
+    """
     for day in WEEKDAYS:
         if day in FEIERTAGE:
             continue  # Skip holidays
-        abs_today = absences_by_day.get(day,set())
-
-        # 1) non-leader OAs with rotations (skip Laufen)
-        for name in [n for n in (oa_bh+oa_li) if n not in abs_today]:
-            s=staff_by_name[name]
-            for og in s.rotations:
-                if og in OG_LIST_NONLEADER: _place_in_og(ws,day,og,name,True)
-
-        # 1b) AAs with rotations (skip Laufen)
-        for name in [n for n in (aa_bh+aa_li) if n not in abs_today]:
-            s=staff_by_name[name]
-            for og in s.rotations:
-                if og in OG_LIST_NONLEADER: _place_in_og(ws,day,og,name,False)
-
-        # 2) no-rotation → lowest FA_COUNTS (skip Laufen and rotation_or_leader_only OGs)
-        def free_ogs(day):
-            """
-            OGs that can receive free assignments (no-rotation FAs/AAs).
-            Excludes OGs in OG_ROTATION_OR_LEADER_ONLY (e.g. Mammo, Nuklearmedizin).
-            """
-            return [
-                og for og in OG_LIST_NONLEADER
-                if og not in OG_ROTATION_OR_LEADER_ONLY
-                and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
-                    ]
-        for name in [n for n in (oa_bh+oa_li) if n not in abs_today and not staff_by_name[n].rotations]:
-            opts = free_ogs(day); 
-            if not opts: continue
-            minv = min(FA_COUNTS[day][og] for og in opts)
-            bucket = [og for og in opts if FA_COUNTS[day][og] == minv]
+        abs_today = absences_by_day.get(day, set())
+        
+        # ===== ROUND 1: OAs =====
+        present_oas = [n for n in (oa_bh + oa_li) if n not in abs_today]
+        
+        # Reset daily counters
+        for name in present_oas:
+            staff_by_name[name].og_nonleader_count = 0
+        
+        # Pool: All OAs with counter that can still fit smallest weight
+        min_weight = min(OG_WEIGHTS.values()) if OG_WEIGHTS else 0.6
+        pool = set(present_oas)
+        
+        while pool:
+            # 1. Find OGs with free slots
+            available_ogs = [og for og in OG_LIST_NONLEADER 
+                           if og not in OG_ROTATION_OR_LEADER_ONLY
+                           and _first_empty_cell(ws, OG_CELLS[og][day]) is not None]
             
-            # Choose OG based on priority order or random
-            if USE_RANDOM_OG_SELECTION:
-                og = rng.choice(bucket)
+            if not available_ogs:
+                break  # No free slots
+            
+            # 2. For each OG: Find compatible persons (counter + weight <= 1.0 AND not already in this OG)
+            og_candidates = {}
+            for og in available_ogs:
+                og_weight = OG_WEIGHTS.get(og, 0.6)
+                compatible = [n for n in pool 
+                            if staff_by_name[n].og_nonleader_count + og_weight <= 1.0
+                            and not _already_listed(ws, OG_CELLS[og][day], n)]
+                if compatible:
+                    og_candidates[og] = compatible
+            
+            if not og_candidates:
+                break  # No compatible OG-person combinations
+            
+            # 3. Prioritize OGs that have people with rotations waiting
+            # First, try to find OGs where someone has a rotation match
+            ogs_with_rotation_matches = []
+            for og, candidates in og_candidates.items():
+                if any(og in staff_by_name[n].rotations for n in candidates):
+                    ogs_with_rotation_matches.append(og)
+            
+            if ogs_with_rotation_matches:
+                # Choose among OGs with rotation matches, preferring lowest FA_COUNT
+                eligible_ogs = ogs_with_rotation_matches
             else:
-                # Sort by priority order, take first
-                bucket_sorted = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)
-                og = bucket_sorted[0]
+                # No rotation matches available, use all OGs
+                eligible_ogs = list(og_candidates.keys())
             
-            _place_in_og(ws, day, og, name, True)
-
-        for name in [n for n in (aa_bh+aa_li) if n not in abs_today and not staff_by_name[n].rotations]:
-            opts = free_ogs(day); 
-            if not opts: continue
-            minv = min(FA_COUNTS[day][og] for og in opts)
-            bucket = [og for og in opts if FA_COUNTS[day][og] == minv]
+            # 4. Choose OG with lowest FA_COUNT (among eligible)
+            minv = min(FA_COUNTS[day][og] for og in eligible_ogs)
+            bucket = [og for og in eligible_ogs if FA_COUNTS[day][og] == minv]
             
-            # Choose OG based on priority order or random
+            # 5. OG-Priority or Random
             if USE_RANDOM_OG_SELECTION:
-                og = rng.choice(bucket)
+                chosen_og = rng.choice(bucket)
             else:
-                # Sort by priority order, take first
-                bucket_sorted = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)
-                og = bucket_sorted[0]
+                chosen_og = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)[0]
             
-            _place_in_og(ws, day, og, name, False)
-
-        # 3) coverage flags
+            # 6. Choose person from compatible candidates
+            # Prioritize: in_rotation > no_rotation > other_rotation
+            candidates = og_candidates[chosen_og]
+            
+            in_rotation = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
+            no_rotation = [n for n in candidates if not staff_by_name[n].rotations]
+            other_rotation = [n for n in candidates 
+                            if staff_by_name[n].rotations 
+                            and chosen_og not in staff_by_name[n].rotations]
+            
+            if in_rotation:
+                pick = rng.choice(in_rotation)
+            elif no_rotation:
+                pick = rng.choice(no_rotation)
+            elif other_rotation:
+                pick = rng.choice(other_rotation)
+            else:
+                break  # Should not happen
+            
+            # 7. Place person in OG
+            _place_in_og(ws, day, chosen_og, pick, count_for_fa=True)
+            
+            # 8. Update counter
+            og_weight = OG_WEIGHTS.get(chosen_og, 0.6)
+            staff_by_name[pick].og_nonleader_count += og_weight
+            
+            # 9. Remove from pool if can't fit any more OGs
+            if staff_by_name[pick].og_nonleader_count + min_weight > 1.0:
+                pool.discard(pick)
+        
+        # ===== ROUND 2: AAs =====
+        present_aas = [n for n in (aa_bh + aa_li) if n not in abs_today]
+        
+        # Reset daily counters
+        for name in present_aas:
+            staff_by_name[name].aa_og_count = 0
+        
+        pool = set(present_aas)
+        
+        while pool:
+            # Same logic as OAs, but using aa_og_count instead
+            available_ogs = [og for og in OG_LIST_NONLEADER 
+                           if og not in OG_ROTATION_OR_LEADER_ONLY
+                           and _first_empty_cell(ws, OG_CELLS[og][day]) is not None]
+            
+            if not available_ogs:
+                break
+            
+            og_candidates = {}
+            for og in available_ogs:
+                og_weight = OG_WEIGHTS.get(og, 0.6)
+                compatible = [n for n in pool 
+                            if staff_by_name[n].aa_og_count + og_weight <= 1.0
+                            and not _already_listed(ws, OG_CELLS[og][day], n)]
+                if compatible:
+                    og_candidates[og] = compatible
+            
+            if not og_candidates:
+                break
+            
+            # Prioritize OGs with rotation matches
+            ogs_with_rotation_matches = []
+            for og, candidates in og_candidates.items():
+                if any(og in staff_by_name[n].rotations for n in candidates):
+                    ogs_with_rotation_matches.append(og)
+            
+            if ogs_with_rotation_matches:
+                eligible_ogs = ogs_with_rotation_matches
+            else:
+                eligible_ogs = list(og_candidates.keys())
+            
+            minv = min(FA_COUNTS[day][og] for og in eligible_ogs)
+            bucket = [og for og in eligible_ogs if FA_COUNTS[day][og] == minv]
+            
+            if USE_RANDOM_OG_SELECTION:
+                chosen_og = rng.choice(bucket)
+            else:
+                chosen_og = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)[0]
+            
+            candidates = og_candidates[chosen_og]
+            
+            in_rotation = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
+            no_rotation = [n for n in candidates if not staff_by_name[n].rotations]
+            other_rotation = [n for n in candidates 
+                            if staff_by_name[n].rotations 
+                            and chosen_og not in staff_by_name[n].rotations]
+            
+            if in_rotation:
+                pick = rng.choice(in_rotation)
+            elif no_rotation:
+                pick = rng.choice(no_rotation)
+            elif other_rotation:
+                pick = rng.choice(other_rotation)
+            else:
+                break
+            
+            _place_in_og(ws, day, chosen_og, pick, count_for_fa=False)
+            
+            og_weight = OG_WEIGHTS.get(chosen_og, 0.6)
+            staff_by_name[pick].aa_og_count += og_weight
+            
+            if staff_by_name[pick].aa_og_count + min_weight > 1.0:
+                pool.discard(pick)
+        
+        # ===== ROUND 3: Coverage flags =====
         for og in OG_LIST:
             cells = OG_CELLS[og][day]
             wrote_fa_shortage = False
@@ -751,7 +890,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             if og not in OGS_SKIP_KEIN_AA and not _has_aa(ws,cells):
                 slot=_first_empty_cell(ws,cells)
                 if slot: ws[slot].value="KEIN AA"; set_bold_red(ws,slot)
-
+    
     return FA_COUNTS
 
 # ---------------- Meetings (Rapporte): standardized 4-pool system ----------------

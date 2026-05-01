@@ -58,7 +58,7 @@ def _str_to_cells(s) -> list:
 # ---------------------------------------------------------------------------
 
 def save_staff_to_json() -> None:
-    """Serialise current sched.staff_by_name to staff.json."""
+    """Serialise current sched.staff_by_name to staff.json with site_rules structure."""
     records = [
         {
             "name": s.name,
@@ -68,13 +68,24 @@ def save_staff_to_json() -> None:
             "rotations": sorted(s.rotations),
             "fr_excluded": s.fr_excluded,
             "fr_excluded_days": sorted(s.fr_excluded_days),
-            "absent_by_default": s.absent_by_default,
-            "covers_for": s.covers_for,
+            "is_cover": s.is_cover,
         }
         for s in sched.staff_by_name.values()
     ]
+    
+    # Preserve site_rules from loaded data or use defaults
+    site_rules = sched.SITE_RULES if sched.SITE_RULES else {
+        "BH": {"no_oa_vormittag": False},
+        "LI": {"no_oa_vormittag": True}
+    }
+    
+    data = {
+        "site_rules": site_rules,
+        "staff": records
+    }
+    
     with open(STAFF_JSON, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def staff_to_display_dataframe() -> pd.DataFrame:
@@ -95,7 +106,7 @@ def staff_to_display_dataframe() -> pd.DataFrame:
             "Organgruppenleitung": ", ".join(sorted(s.leads_ogs)) or "—",
             "Rotationen": ", ".join(sorted(s.rotations)) or "—",
             "Kein Frontarzt": fr_info,
-            "Stellvertretung": f"Für {s.covers_for}" if s.absent_by_default and s.covers_for else ("Standardmäßig absent" if s.absent_by_default else "—"),
+            "Stellvertreter": "Ja" if s.is_cover else "—",
         })
     return pd.DataFrame(rows)
 
@@ -282,21 +293,10 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
         )
 
         st.markdown("**Stellvertretungsregel**")
-        sub_col1, sub_col2 = st.columns([1, 2])
-        absent_by_default = sub_col1.checkbox(
-            "Standardmäßig absent",
-            value=d.get("absent_by_default", False),
-            help="Person ist grundsätzlich absent und erscheint nur wenn die vertretene Person fehlt.",
-        )
-        covers_for_options = [""] + sorted(sched.staff_by_name.keys())
-        current_covers_for = d.get("covers_for") or ""
-        covers_for_idx = covers_for_options.index(current_covers_for) if current_covers_for in covers_for_options else 0
-        covers_for = sub_col2.selectbox(
-            "Vertritt",
-            options=covers_for_options,
-            index=covers_for_idx,
-            disabled=not absent_by_default,
-            help="Person wird verfügbar wenn die ausgewählte Person absent ist.",
+        is_cover = st.checkbox(
+            "Ist Stellvertreter",
+            value=d.get("is_cover", False),
+            help="Stellvertreter werden nicht in der wöchentlichen Abwesenheitsliste aufgeführt, auch wenn sie abwesend sind",
         )
 
         label = "Änderungen speichern" if defaults else "Hinzufügen"
@@ -310,8 +310,7 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
                 "rotations": rots,
                 "fr_excluded": fr_always,
                 "fr_excluded_days": [] if fr_always else fr_days,
-                "absent_by_default": absent_by_default,
-                "covers_for": covers_for if covers_for else None,
+                "is_cover": is_cover,
             }
     return None
 
@@ -394,15 +393,19 @@ with tab_template:
                 # Read absences
                 absences = sched.read_absences_by_day(ws)
                 
+                # Create RNG from seed for reproducibility
+                import random
+                rng = random.Random(seed_opt1)
+                
                 # Stage 1: OG
                 sched.assign_la_to_ogs(ws, absences)
-                sched.assign_nonleaders_to_ogs(ws, absences, seed=seed_opt1)
+                sched.assign_nonleaders_to_ogs(ws, absences, rng)
                 
                 # Stage 2: FR
-                sched.assign_fr_shifts_to_cells(ws, absences, seed=seed_opt1)
+                sched.assign_fr_shifts_to_cells(ws, absences, rng)
                 
                 # Stage 3: Meetings
-                sched.assign_meetings(ws, absences, seed=seed_opt1)
+                sched.assign_meetings(ws, absences, rng)
                 
                 # Save
                 wb.save(output_tmp_path)
@@ -539,15 +542,19 @@ with tab_eigene:
                 # Read absences
                 absences = sched.read_absences_by_day(ws)
                 
+                # Create RNG from seed for reproducibility
+                import random
+                rng = random.Random(seed_opt2)
+                
                 # Stage 1: OG
                 sched.assign_la_to_ogs(ws, absences)
-                sched.assign_nonleaders_to_ogs(ws, absences, seed=seed_opt2)
+                sched.assign_nonleaders_to_ogs(ws, absences, rng)
                 
                 # Stage 2: FR
-                sched.assign_fr_shifts_to_cells(ws, absences, seed=seed_opt2)
+                sched.assign_fr_shifts_to_cells(ws, absences, rng)
                 
                 # Stage 3: Meetings
-                sched.assign_meetings(ws, absences, seed=seed_opt2)
+                sched.assign_meetings(ws, absences, rng)
                 
                 # Save
                 wb.save(output_tmp_path)
@@ -648,8 +655,7 @@ with tab_personal:
             "rotations": sorted(s.rotations),
             "fr_excluded": s.fr_excluded,
             "fr_excluded_days": sorted(s.fr_excluded_days),
-            "absent_by_default": s.absent_by_default,
-            "covers_for": s.covers_for,
+            "is_cover": s.is_cover,
         }
         result = _staff_form("edit_staff_form", defaults=edit_defaults)
         if result:
@@ -661,8 +667,7 @@ with tab_personal:
                 rotation=result["rotations"],
                 fr_excluded=result["fr_excluded"],
                 fr_excluded_days=result["fr_excluded_days"],
-                absent_by_default=result["absent_by_default"],
-                covers_for=result["covers_for"],
+                is_cover=result["is_cover"],
             )
             sched.rebuild_quick_views()
             save_staff_to_json()
@@ -737,13 +742,50 @@ with tab_personal:
                     rotation=result["rotations"],
                     fr_excluded=result["fr_excluded"],
                     fr_excluded_days=result["fr_excluded_days"],
-                    absent_by_default=result["absent_by_default"],
-                    covers_for=result["covers_for"],
+                    is_cover=result["is_cover"],
                 )
                 sched.rebuild_quick_views()
                 save_staff_to_json()
                 st.success(f"'{name_clean}' wurde hinzugefügt und gespeichert.")
                 st.rerun()
+    
+    # Site-specific rules
+    st.divider()
+    st.subheader("Standort-spezifische Regeln")
+    
+    # Load current rules
+    site_rules = sched.SITE_RULES if sched.SITE_RULES else {
+        "BH": {"no_oa_vormittag": False},
+        "LI": {"no_oa_vormittag": True}
+    }
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Bruderholz (BH)**")
+        bh_no_oa = st.checkbox(
+            "Keine OAs im Frontarzt-Vormittagsdienst",
+            value=site_rules.get("BH", {}).get("no_oa_vormittag", False),
+            key="bh_no_oa_vormittag"
+        )
+    
+    with col2:
+        st.markdown("**Liestal (LI)**")
+        li_no_oa = st.checkbox(
+            "Keine OAs im Frontarzt-Vormittagsdienst",
+            value=site_rules.get("LI", {}).get("no_oa_vormittag", True),
+            key="li_no_oa_vormittag"
+        )
+    
+    if st.button("Standort-Regeln speichern", type="primary"):
+        # Update site_rules in memory and save to staff.json
+        sched.SITE_RULES = {
+            "BH": {"no_oa_vormittag": bh_no_oa},
+            "LI": {"no_oa_vormittag": li_no_oa}
+        }
+        save_staff_to_json()
+        st.success("Standort-Regeln gespeichert!")
+        st.rerun()
 
 # ===========================================================================
 # TAB 5 — Layout-Editor
@@ -1365,6 +1407,41 @@ with tab_organgruppen:
         og_rules["use_random_og_selection"] = use_random
         save_og_rules(og_rules)
         st.success("Organgruppen-Priorität gespeichert!")
+        st.rerun()
+    
+    st.divider()
+    
+    # Section 1b: OG Weights
+    st.markdown("### OG-Gewichtung für Zuteilungs-Counter")
+    st.caption("Gewichtung zwischen 0.1 und 1.0. Niedrigere Werte erlauben mehr Zuweisungen pro Person. "
+              "Beispiel: 0.4 ermöglicht 2 Zuweisungen (0.4 + 0.4 = 0.8 ≤ 1.0), 0.6 ermöglicht max. 1 Zuweisung.")
+    
+    og_weights = og_rules.get("og_weights", {})
+    
+    # Display in 2 columns
+    col1, col2 = st.columns(2)
+    updated_weights = {}
+    
+    for i, og in enumerate(OG_LIST_NO_LAUFEN):
+        col = col1 if i % 2 == 0 else col2
+        
+        default = 0.4 if og in ["Mammo", "Intervention/ Vaskulär"] else 0.6
+        with col:
+            weight = st.number_input(
+                og,
+                min_value=0.1,
+                max_value=1.0,
+                value=og_weights.get(og, default),
+                step=0.1,
+                format="%.1f",
+                key=f"og_weight_{og}"
+            )
+            updated_weights[og] = weight
+    
+    if st.button("OG-Gewichtungen speichern", type="primary", key="save_og_weights"):
+        og_rules["og_weights"] = updated_weights
+        save_og_rules(og_rules)
+        st.success("OG-Gewichtungen gespeichert!")
         st.rerun()
     
     st.divider()
