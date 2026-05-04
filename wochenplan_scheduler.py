@@ -1050,6 +1050,31 @@ def assign_meeting_by_pools(
                 base = [n for n in spaetdienst[pool_site][day]
                         if staff_by_name.get(n) and staff_by_name[n].role == AA
                         and staff_by_name[n].site == pool_site]
+                # Filter for absence, exclude_names, exclude_if_day only —
+                # site is already guaranteed by the base list construction above.
+                # Bypasses _fair_pick_pool: the Spätdienst AA is deterministic, not rotated.
+                cands = _filter_candidates(
+                    base, day=day, site=site, absences=absences,
+                    spaetdienst_by_site_day=spaetdienst,
+                    exclude_names=set(pool.get("exclude_names", [])) or None,
+                    exclude_if_day={k: set(v) for k, v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
+                    rapporte_excluded_names=rapporte_excluded_names,
+                    exclude_hintergrund=False,
+                )
+                if cands:
+                    pick = cands[0]
+                    _assign(ws, a1, pick, style)
+                    if monday_style and day == "Montag":
+                        if monday_style == "red": set_red(ws, a1)
+                    _bump_pool(meeting_key, idx, pick)
+                    staff_by_name[pick].meetings_count += 1
+                    staff_by_name[pick].meetings_count_week += 1
+                    day_counter_name = f"meetings_count_{day.lower()}"
+                    setattr(staff_by_name[pick], day_counter_name,
+                            getattr(staff_by_name[pick], day_counter_name, 0) + 1)
+                    placed = True
+                    break
+                continue  # No eligible Spätdienst AA — fall through to next pool
             elif ptype == "hintergrund_vortag":
                 # Sunday-first priority: try each candidate individually through the
                 # full filter so all exclusions apply; use the first one that survives.

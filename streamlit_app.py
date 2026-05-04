@@ -353,8 +353,9 @@ def save_og_rules(data: dict) -> None:
     og_rules_path = Path(__file__).parent / "og_rules.json"
     with open(og_rules_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    # Reload in scheduler module
+    # Reload all og_rules derived variables in scheduler module
     sched.OG_ROTATION_OR_LEADER_ONLY, sched.OG_WARN_KEIN_AA, sched.TARGET_OG_FOR_ONE_FA, sched.TARGET_OG_FOR_KEIN_FA_SITE, sched.OG_EXCLUDE_FROM_RAPPORTE = sched._load_og_rules()
+    sched.OGS_SKIP_KEIN_AA = set(sched.OG_LIST) - sched.OG_WARN_KEIN_AA
 
 
 # ---------------------------------------------------------------------------
