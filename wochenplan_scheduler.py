@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Wochenplan Scheduler (pipeline: OG leaders → OG non-leaders → FR → Meetings)
 
@@ -86,6 +86,7 @@ def _load_og_rules():
         set(_r.get("warn_kein_aa", [])),
         set(_r.get("warn_weniger_als_2fa", [])),
         set(_r.get("warn_kein_fa_site", [])),
+        set(_r.get("exclude_from_rapporte", [])),
     )
 
 # OG Lists - will be populated from organgruppen.json
@@ -98,7 +99,7 @@ OG_WEIGHTS_OA: Dict[str, float] = {}
 OG_WEIGHTS_AA: Dict[str, float] = {}
 OG_MAX_FAS: Dict[str, Optional[int]] = {}
 OG_MAX_AAS: Dict[str, Optional[int]] = {}
-OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
+OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OG_EXCLUDE_FROM_RAPPORTE = _load_og_rules()
 OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
 
 
@@ -239,6 +240,11 @@ WEEKDAY_DATE_CELLS: Dict[str, str]                                     = {}
 FEIERTAGE:         Set[str]                                            = set()
 FEIERTAGE_MERGE_CELLS: Dict[str, str]                                  = {}
 
+# Populated by fill_dienste_from_csv() — keyed by the day the Hintergrund shift occurs
+# (Mon–Fri for Nacht Mo-Fr, "Sonntag" for 24h Sa/So weekend shift).
+# _filter_candidates() looks up D-1 to exclude the person from meetings the next morning.
+HINTERGRUND_BY_DAY: Dict[str, str]                                     = {}
+
 
 def load_layout_from_json(path: str) -> None:
     """Load all cell-map constants from layout.json, replacing current values."""
@@ -323,8 +329,8 @@ load_meeting_pools_from_json(_pools_json)
 
 def reload_og_rules() -> None:
     """Reload OG special rules from og_rules.json and organgruppen.json — call after saving via UI."""
-    global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA
-    OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE = _load_og_rules()
+    global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA, OG_EXCLUDE_FROM_RAPPORTE
+    OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OG_EXCLUDE_FROM_RAPPORTE = _load_og_rules()
     OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
 
 
@@ -941,8 +947,8 @@ def _filter_candidates(base: List[str], *, day: str, site: str,
                        exclude_spaetdienst: Optional[str] = None,
                        exclude_names: Optional[Set[str]] = None,
                        exclude_if_day: Optional[Dict[str, Set[str]]] = None,
-                       exclude_laufen: bool = False,
-                       laufen_names: Optional[Set[str]] = None) -> List[str]:
+                       rapporte_excluded_names: Optional[Set[str]] = None,
+                       exclude_hintergrund: bool = False) -> List[str]:
     c = [n for n in base if n not in absences.get(day, set())]
     if exclude_spaetdienst:
         c = [n for n in c if n not in spaetdienst_by_site_day.get(exclude_spaetdienst, {}).get(day, set())]
@@ -950,8 +956,28 @@ def _filter_candidates(base: List[str], *, day: str, site: str,
         c = [n for n in c if n not in exclude_names]
     if exclude_if_day and day in exclude_if_day:
         c = [n for n in c if n not in exclude_if_day[day]]
-    if exclude_laufen and laufen_names:
-        c = [n for n in c if n not in laufen_names]
+    if rapporte_excluded_names:
+        c = [n for n in c if n not in rapporte_excluded_names]
+    if exclude_hintergrund:
+        # Look up who had Hintergrund the previous night (D-1).
+        # Only exclude if the person belongs to the same site as the pool.
+        # Monday: the weekend shift may be split across Samstag and Sonntag,
+        # so exclude both to be safe.
+        if day == "Montag":
+            for prev_key in ("Sonntag", "Samstag"):
+                prev_hintergrund = HINTERGRUND_BY_DAY.get(prev_key)
+                if prev_hintergrund:
+                    s = staff_by_name.get(prev_hintergrund)
+                    if s and s.site == site:
+                        c = [n for n in c if n != prev_hintergrund]
+        else:
+            idx = WEEKDAYS.index(day)
+            prev_key = WEEKDAYS[idx - 1]
+            prev_hintergrund = HINTERGRUND_BY_DAY.get(prev_key)
+            if prev_hintergrund:
+                s = staff_by_name.get(prev_hintergrund)
+                if s and s.site == site:
+                    c = [n for n in c if n != prev_hintergrund]
     return c
 
 def _fair_pick_pool(meeting_key: str, pool_idx: int, candidates: List[str], 
@@ -1003,7 +1029,7 @@ def assign_meeting_by_pools(
     pools: List[dict],         # up to 4 pools
     absences: Dict[str, Set[str]],
     spaetdienst: Dict[str, Dict[str, Set[str]]],
-    laufen_names: Set[str],
+    rapporte_excluded_names: Set[str],
     monday_style: Optional[str] = None,       # e.g., "red"
     fallback_text: Optional[str] = "FÄLLT AUS",
     fallback_style: Optional[str] = "red_bold",
@@ -1020,20 +1046,66 @@ def assign_meeting_by_pools(
             elif ptype == "group":
                 base = _group_names(pool["group"], pool.get("site", site))
             elif ptype == "spaetdienst_aa":
-                base = list(spaetdienst[pool.get("site", site)][day])
-                base = [n for n in base if staff_by_name.get(n) and staff_by_name[n].role == AA and staff_by_name[n].site == pool.get("site", site)]
+                pool_site = pool.get("site", site)
+                base = [n for n in spaetdienst[pool_site][day]
+                        if staff_by_name.get(n) and staff_by_name[n].role == AA
+                        and staff_by_name[n].site == pool_site]
+            elif ptype == "hintergrund_vortag":
+                # Sunday-first priority: try each candidate individually through the
+                # full filter so all exclusions apply; use the first one that survives.
+                if day == "Montag":
+                    ordered = [HINTERGRUND_BY_DAY.get("Sonntag"),
+                               HINTERGRUND_BY_DAY.get("Samstag")]
+                else:
+                    prev_key = WEEKDAYS[WEEKDAYS.index(day) - 1]
+                    ordered = [HINTERGRUND_BY_DAY.get(prev_key)]
+
+                pick = None
+                for candidate in ordered:
+                    if not candidate:
+                        continue
+                    s = staff_by_name.get(candidate)
+                    if not s or s.site != pool.get("site", site):
+                        continue  # Wrong site — skip
+                    cands = _filter_candidates(
+                        [candidate], day=day, site=site, absences=absences,
+                        spaetdienst_by_site_day=spaetdienst,
+                        exclude_spaetdienst=pool.get("exclude_spaetdienst"),
+                        exclude_names=set(pool.get("exclude_names", [])) or None,
+                        exclude_if_day={k: set(v) for k, v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
+                        rapporte_excluded_names=rapporte_excluded_names,
+                        exclude_hintergrund=False,  # Would be circular
+                    )
+                    if cands:
+                        pick = cands[0]
+                        break
+
+                if pick:
+                    _assign(ws, a1, pick, style)
+                    if monday_style and day == "Montag":
+                        if monday_style == "red": set_red(ws, a1)
+                    _bump_pool(meeting_key, idx, pick)
+                    staff_by_name[pick].meetings_count += 1
+                    staff_by_name[pick].meetings_count_week += 1
+                    day_counter_name = f"meetings_count_{day.lower()}"
+                    setattr(staff_by_name[pick], day_counter_name,
+                            getattr(staff_by_name[pick], day_counter_name, 0) + 1)
+                    placed = True
+                    break
+                continue  # No eligible Hintergrund person — fall through to next pool
+
             else:
                 raise ValueError(f"Unknown pool type: {ptype}")
 
-            # Filter (supports per-day Laufen exclusion)
+            # Filter candidates through all exclusion rules
             cands = _filter_candidates(
                 base, day=day, site=site, absences=absences,
                 spaetdienst_by_site_day=spaetdienst,
                 exclude_spaetdienst=pool.get("exclude_spaetdienst"),
                 exclude_names=set(pool.get("exclude_names", [])) or None,
                 exclude_if_day={k:set(v) for k,v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
-                exclude_laufen=pool.get("exclude_laufen", False),
-                laufen_names=laufen_names,
+                rapporte_excluded_names=rapporte_excluded_names,
+                exclude_hintergrund=pool.get("exclude_hintergrund", False),
             )
 
             pick = _fair_pick_pool(meeting_key, idx, cands, rng, day)
@@ -1059,8 +1131,19 @@ def assign_meeting_by_pools(
 def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Random):
     write_medizin_placeholders_monday(ws)
 
-    laufen_by_day = get_persons_assigned_to_laufen(ws)
-    spaet         = read_spaetdienst_by_day(ws)
+    spaet = read_spaetdienst_by_day(ws)
+
+    # Build per-day set of persons assigned to any OG that is excluded from rapporte.
+    # Reads directly from the already-written OG cells in the sheet.
+    rapporte_excluded_by_day: Dict[str, Set[str]] = {d: set() for d in WEEKDAYS}
+    for og in OG_EXCLUDE_FROM_RAPPORTE:
+        if og not in OG_CELLS:
+            continue
+        for day in WEEKDAYS:
+            for a1 in OG_CELLS[og].get(day, ()):
+                v = ws[a1].value
+                if isinstance(v, str) and v.strip():
+                    rapporte_excluded_by_day[day].add(v.strip())
 
     # Iterate over all meetings defined in meeting_pools.json
     for meeting_key, cfg in MEETING_POOLS.items():
@@ -1087,7 +1170,7 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
             assign_meeting_by_pools(
                 ws, rng=rng, meeting_key=meeting_key, site=site, day=day, cells=cells,
                 pools=pools, absences=absences, spaetdienst=spaet,
-                laufen_names=laufen_by_day.get(day, set()),
+                rapporte_excluded_names=rapporte_excluded_by_day.get(day, set()),
                 monday_style=None,
                 fallback_text=fallback_text, fallback_style=fallback_style,
             )
@@ -1299,6 +1382,7 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     with open(_bez_path, encoding="utf-8") as _f:
         _bez = json.load(_f)
     ABSENZ_TYPES = set(_bez.get("absenz", []))
+    SKIP_TYPES   = set(_bez.get("skip", []))   # EIR, PEPVIRTUELL etc. — ignore silently
     
     # Day name mapping (German date to layout key)
     day_names = {
@@ -1312,6 +1396,7 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     spaet_by_day = {"BH": {}, "LI": {}}
     vordergrund_by_day = {}
     hintergrund_by_day = {}
+    HINTERGRUND_BY_DAY.clear()
     
     # Process each row
     for _, row in df.iterrows():
@@ -1328,7 +1413,10 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         abbrev_name = matched_name
         
         # Categorize dienst
-        if dienst_type in ABSENZ_TYPES:
+        if dienst_type in SKIP_TYPES:
+            continue  # EIR, PEPVIRTUELL etc. — ignore entirely
+
+        elif dienst_type in ABSENZ_TYPES:
             absences_by_day[day_name].append(abbrev_name)
         
         elif "Nachtdienst" in dienst_type:
@@ -1345,9 +1433,24 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         elif "Tagdienst Sa/So" in dienst_type:
             vordergrund_by_day[day_name] = abbrev_name
         
-        # Hintergrunddienst - all Pikett types (including Pikett_24h_Sa/So)
+        # Hintergrunddienst Nacht Mo-Fr: stored under the weekday it occurs
+        elif "Pikett_Nacht_Mo-Fr" in dienst_type:
+            hintergrund_by_day[day_name] = abbrev_name
+            HINTERGRUND_BY_DAY[day_name] = abbrev_name
+
+        # Hintergrunddienst 24h Sa/So: stored under the day it occurs (e.g. "Sonntag")
+        # so Monday's D-1 lookup finds it under "Sonntag"
+        elif "Pikett_24h_Sa/So" in dienst_type:
+            hintergrund_by_day[day_name] = abbrev_name
+            HINTERGRUND_BY_DAY[day_name] = abbrev_name
+
+        # Other Pikett types (e.g. Pikett_Vormittag) — write to Excel only
         elif "Pikett" in dienst_type:
             hintergrund_by_day[day_name] = abbrev_name
+
+        # Tagdienst (weekday and weekend) — normal working day, no special cell to write
+        elif "Tagdienst" in dienst_type:
+            pass
     
     # Write to Excel
     from openpyxl.styles import PatternFill

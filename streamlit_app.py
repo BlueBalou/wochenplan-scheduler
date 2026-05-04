@@ -29,7 +29,8 @@ ALL_WEEKDAYS = sched.WEEKDAYS  # ["Montag","Dienstag","Mittwoch","Donnerstag","F
 _POOL_TYPES_MAP = {
     "names": "Person",
     "group": "Gruppe",
-    "spaetdienst_aa": "Spätdienst_AA"
+    "spaetdienst_aa": "Spätdienst_AA",
+    "hintergrund_vortag": "Hintergrund Vortag",
 }
 _POOL_TYPES = list(_POOL_TYPES_MAP.keys())
 _POOL_TYPES_DISPLAY = list(_POOL_TYPES_MAP.values())
@@ -187,12 +188,12 @@ def _delete_rapport(key: str) -> None:
     save_layout(layout)
 
 
-def _add_rapport(key: str, exclude_laufen: bool = False) -> None:
+def _add_rapport(key: str) -> None:
     """Add a new rapport to both layout.json and meeting_pools.json with empty defaults."""
     pools_data = load_meeting_pools()
     pools_data[key] = {
         "site": key.split("|", 1)[0],
-        "pools": [{"type": "names", "names": [], "site": key.split("|", 1)[0], "exclude_laufen": exclude_laufen}],
+        "pools": [{"type": "names", "names": [], "site": key.split("|", 1)[0]}],
         "fallback_text": "FÄLLT AUS",
         "roter_fallback_text": True,
     }
@@ -353,7 +354,7 @@ def save_og_rules(data: dict) -> None:
     with open(og_rules_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     # Reload in scheduler module
-    sched.OG_ROTATION_OR_LEADER_ONLY, sched.OG_WARN_KEIN_AA, sched.TARGET_OG_FOR_ONE_FA, sched.TARGET_OG_FOR_KEIN_FA_SITE = sched._load_og_rules()
+    sched.OG_ROTATION_OR_LEADER_ONLY, sched.OG_WARN_KEIN_AA, sched.TARGET_OG_FOR_ONE_FA, sched.TARGET_OG_FOR_KEIN_FA_SITE, sched.OG_EXCLUDE_FROM_RAPPORTE = sched._load_og_rules()
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +498,7 @@ if page == "📋 Wochenplan (Standard)":
         key="csv_opt1",
         disabled=not template_exists
     )
+    st.caption("*Für Wochenenddienste: CSV bitte ab Samstag der Vorwoche beginnen lassen, damit Hintergrunddienste korrekt berücksichtigt werden.*")
     
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -653,6 +655,7 @@ elif page == "📄 Wochenplan (Eigene Vorlage)":
         help="CSV-Datei mit Absenzen und Diensten.",
         key="csv_opt2"
     )
+    st.caption("*Für Wochenenddienste: CSV bitte ab Samstag der Vorwoche beginnen lassen, damit Hintergrunddienste korrekt berücksichtigt werden.*")
     
     template_file_opt2 = st.file_uploader(
         "Eigene Wochenplan-Vorlage (.xlsm) hochladen",
@@ -1025,7 +1028,7 @@ elif page == "📊 Rapporte verwalten":
                 st.warning(f"'{new_r_key}' existiert bereits.")
             else:
                 try:
-                    _add_rapport(new_r_key, exclude_laufen=st.session_state.get("global_exclude_laufen", False))
+                    _add_rapport(new_r_key)
                     st.success(f"'{new_r_key}' wurde hinzugefügt. Zellen im Layout-Editor eintragen.")
                     st.rerun()
                 except Exception as e:
@@ -1266,7 +1269,7 @@ elif page == "📊 Rapporte-Pools":
                 )
                 pool["style"] = "red_bold" if roter_text else None
 
-                # Type-specific fields
+                # Type-specific fields — hidden for auto-resolved types
                 if pool_type == "names":
                     current_names = pool.get("names") or []
                     selected_names = st.multiselect(
@@ -1290,14 +1293,30 @@ elif page == "📊 Rapporte-Pools":
                     pool_group = _GROUP_OPTIONS[_GROUP_DISPLAY.index(pool_group_display)]
                     pool["group"] = pool_group
 
-                # Spätdienst checkbox (single column now, Laufen moved to global)
-                excl_spaet = st.checkbox(
+                if pool_type == "hintergrund_vortag":
+                    st.caption("Person wird automatisch aus dem Hintergrund-Dienst des Vortags bestimmt.")
+
+                # Spätdienst / Hintergrund exclusion checkboxes (side by side)
+                # Both hidden for hintergrund_vortag (person is fully determined)
+                is_auto_type = pool_type in ("spaetdienst_aa", "hintergrund_vortag")
+                cb_col1, cb_col2 = st.columns(2)
+                excl_spaet = cb_col1.checkbox(
                     "Spätdienst ausschließen",
                     value=bool(pool.get("exclude_spaetdienst")),
                     key=f"{prefix}_p{i}_excl_spaet",
                     help=f"Schließt Spätdienst-Personal von {pool_site} aus.",
+                    disabled=is_auto_type,
                 )
                 pool["exclude_spaetdienst"] = pool_site if excl_spaet else None
+
+                excl_hintergrund = cb_col2.checkbox(
+                    "Hintergrund ausschließen",
+                    value=bool(pool.get("exclude_hintergrund")),
+                    key=f"{prefix}_p{i}_excl_hintergr",
+                    help="Schließt die Person aus, die am Vortag Hintergrund hatte.",
+                    disabled=is_auto_type,
+                )
+                pool["exclude_hintergrund"] = excl_hintergrund
 
                 # Ausgeschlossene Personen
                 current_excluded = pool.get("exclude_names") or []
@@ -1332,12 +1351,10 @@ elif page == "📊 Rapporte-Pools":
                         st.rerun()
 
             if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
-                exclude_laufen_global = st.session_state.get("global_exclude_laufen", False)
                 pools.append({
                     "type": "names",
                     "names": [],
                     "site": cfg.get("site", "BH"),
-                    "exclude_laufen": exclude_laufen_global,
                 })
                 cfg["pools"] = pools
                 save_meeting_pools(pools_data)
@@ -1379,7 +1396,7 @@ elif page == "📊 Rapporte-Pools":
                 for pool in cfg.get("pools", []):
                     for k in list(pool.keys()):
                         if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
-                            if k not in ("type", "names", "group", "site", "exclude_laufen"):
+                            if k not in ("type", "names", "group", "site", "exclude_hintergrund"):
                                 del pool[k]
             save_meeting_pools(pools_data)
             st.success("Rapporte-Pools gespeichert und neu geladen.")
