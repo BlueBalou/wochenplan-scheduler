@@ -472,7 +472,9 @@ page = st.sidebar.radio(
         "📄 Wochenplan (Eigene Vorlage)", 
         "👥 Personalverwaltung",
         "📊 Rapporte verwalten",
-        "📊 Rapporte-Pools",
+        "📊 Rapporte-Pools BH",
+        "📊 Rapporte-Pools LI",
+        "🩺 Frontarzt",
         "🏥 Organgruppen Verwalten",
         "🏥 Organgruppen Regeln",
         "🔧 Layout-Editor"
@@ -925,44 +927,6 @@ elif page == "👥 Personalverwaltung":
                 save_staff_to_json()
                 st.success(f"'{name_clean}' wurde hinzugefügt und gespeichert.")
                 st.rerun()
-    
-    # Site-specific rules
-    st.divider()
-    st.subheader("Standort-spezifische Regeln")
-    
-    # Load current rules
-    site_rules = sched.SITE_RULES if sched.SITE_RULES else {
-        "BH": {"no_oa_vormittag": False},
-        "LI": {"no_oa_vormittag": True}
-    }
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**Bruderholz (BH)**")
-        bh_no_oa = st.checkbox(
-            "Keine OAs im Frontarzt-Vormittagsdienst",
-            value=site_rules.get("BH", {}).get("no_oa_vormittag", False),
-            key="bh_no_oa_vormittag"
-        )
-    
-    with col2:
-        st.markdown("**Liestal (LI)**")
-        li_no_oa = st.checkbox(
-            "Keine OAs im Frontarzt-Vormittagsdienst",
-            value=site_rules.get("LI", {}).get("no_oa_vormittag", True),
-            key="li_no_oa_vormittag"
-        )
-    
-    if st.button("Standort-Regeln speichern", type="primary"):
-        # Update site_rules in memory and save to staff.json
-        sched.SITE_RULES = {
-            "BH": {"no_oa_vormittag": bh_no_oa},
-            "LI": {"no_oa_vormittag": li_no_oa}
-        }
-        save_staff_to_json()
-        st.success("Standort-Regeln gespeichert!")
-        st.rerun()
 
 
 elif page == "📊 Rapporte verwalten":
@@ -1209,190 +1173,90 @@ elif page == "🔧 Layout-Editor":
         st.rerun()
 
 # ===========================================================================
-# TAB 6 — Rapporte-Pools
+# TAB 6a — Rapporte-Pools BH
 # ===========================================================================
 
-# Pool type options with display labels
-
-
-elif page == "📊 Rapporte-Pools":
-    st.subheader("Rapporte-Pools")
+elif page == "📊 Rapporte-Pools BH":
+    st.subheader("Rapporte-Pools — BH")
     st.caption(
-        "Hier können die Prioritäts-Pools für jeden Rapport bearbeitet werden. "
+        "Hier können die Prioritäts-Pools für BH-Rapporte bearbeitet werden. "
         "Die Pools werden in der definierten Reihenfolge durchlaufen, bis eine "
         "verfügbare Person gefunden wird."
     )
-    st.markdown("**Pools** (in Prioritätsreihenfolge)")
 
     pools_data = load_meeting_pools()
+    site_pools = {k: v for k, v in pools_data.items() if v.get("site") == "BH"}
 
-    for meeting_key, cfg in pools_data.items():
+    for meeting_key, cfg in site_pools.items():
         with st.expander(meeting_key):
             prefix = meeting_key.replace("|", "_").replace(" ", "_").replace(":", "").replace("/", "_").replace("(", "").replace(")", "")
-
             pools = cfg.get("pools", [])
-
-            # Get all staff names for dropdowns
             all_staff_names = sorted(sched.staff_by_name.keys())
 
             for i, pool in enumerate(pools):
-                st.markdown(
-                    f"<span style='font-size:1.05rem; font-weight:700; color:#4A90D9;'>Pool {i+1}</span>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f"<span style='font-size:1.05rem; font-weight:700; color:#4A90D9;'>Pool {i+1}</span>", unsafe_allow_html=True)
                 st.markdown("---")
                 pc1, pc2, pc3 = st.columns(3)
-
-                # Typ dropdown with display labels
                 current_type = pool.get("type", "names")
                 type_display_idx = _POOL_TYPES.index(current_type) if current_type in _POOL_TYPES else 0
-                pool_type_display = pc1.selectbox(
-                    "Typ", 
-                    options=_POOL_TYPES_DISPLAY,
-                    index=type_display_idx,
-                    key=f"{prefix}_p{i}_type",
-                )
+                pool_type_display = pc1.selectbox("Typ", options=_POOL_TYPES_DISPLAY, index=type_display_idx, key=f"{prefix}_p{i}_type")
                 pool_type = _POOL_TYPES[_POOL_TYPES_DISPLAY.index(pool_type_display)]
                 pool["type"] = pool_type
-
-                pool_site = pc2.selectbox(
-                    "Standort", options=_SITE_OPTIONS,
-                    index=_SITE_OPTIONS.index(pool.get("site", cfg.get("site", "BH"))),
-                    key=f"{prefix}_p{i}_site",
-                )
+                pool_site = pc2.selectbox("Standort", options=_SITE_OPTIONS, index=_SITE_OPTIONS.index(pool.get("site", cfg.get("site", "BH"))), key=f"{prefix}_p{i}_site")
                 pool["site"] = pool_site
-
-                # Roter Text checkbox
-                roter_text = pc3.checkbox(
-                    "Roter Text",
-                    value=(pool.get("style") == "red_bold"),
-                    key=f"{prefix}_p{i}_rot",
-                )
+                roter_text = pc3.checkbox("Roter Text", value=(pool.get("style") == "red_bold"), key=f"{prefix}_p{i}_rot")
                 pool["style"] = "red_bold" if roter_text else None
-
-                # Type-specific fields — hidden for auto-resolved types
                 if pool_type == "names":
                     current_names = pool.get("names") or []
-                    selected_names = st.multiselect(
-                        "Namen",
-                        options=all_staff_names,
-                        default=[n for n in current_names if n in all_staff_names],
-                        key=f"{prefix}_p{i}_names",
-                        help="Wählen Sie Personen für diesen Pool aus.",
-                    )
+                    selected_names = st.multiselect("Namen", options=all_staff_names, default=[n for n in current_names if n in all_staff_names], key=f"{prefix}_p{i}_names")
                     pool["names"] = selected_names if selected_names else []
-
                 if pool_type == "group":
                     current_group = pool.get("group", "AA")
                     group_display_idx = _GROUP_OPTIONS.index(current_group) if current_group in _GROUP_OPTIONS else 0
-                    pool_group_display = st.selectbox(
-                        "Gruppe", 
-                        options=_GROUP_DISPLAY,
-                        index=group_display_idx,
-                        key=f"{prefix}_p{i}_group",
-                    )
-                    pool_group = _GROUP_OPTIONS[_GROUP_DISPLAY.index(pool_group_display)]
-                    pool["group"] = pool_group
-
+                    pool_group_display = st.selectbox("Gruppe", options=_GROUP_DISPLAY, index=group_display_idx, key=f"{prefix}_p{i}_group")
+                    pool["group"] = _GROUP_OPTIONS[_GROUP_DISPLAY.index(pool_group_display)]
                 if pool_type == "hintergrund_vortag":
                     st.caption("Person wird automatisch aus dem Hintergrund-Dienst des Vortags bestimmt.")
-
-                # Spätdienst / Hintergrund exclusion checkboxes (side by side)
-                # Both hidden for hintergrund_vortag (person is fully determined)
                 is_auto_type = pool_type in ("spaetdienst_aa", "hintergrund_vortag")
                 cb_col1, cb_col2 = st.columns(2)
-                excl_spaet = cb_col1.checkbox(
-                    "Spätdienst ausschließen",
-                    value=bool(pool.get("exclude_spaetdienst")),
-                    key=f"{prefix}_p{i}_excl_spaet",
-                    help=f"Schließt Spätdienst-Personal von {pool_site} aus.",
-                    disabled=is_auto_type,
-                )
+                excl_spaet = cb_col1.checkbox("Spätdienst ausschließen", value=bool(pool.get("exclude_spaetdienst")), key=f"{prefix}_p{i}_excl_spaet", disabled=is_auto_type)
                 pool["exclude_spaetdienst"] = pool_site if excl_spaet else None
-
-                excl_hintergrund = cb_col2.checkbox(
-                    "Hintergrund ausschließen",
-                    value=bool(pool.get("exclude_hintergrund")),
-                    key=f"{prefix}_p{i}_excl_hintergr",
-                    help="Schließt die Person aus, die am Vortag Hintergrund hatte.",
-                    disabled=is_auto_type,
-                )
+                excl_hintergrund = cb_col2.checkbox("Hintergrund ausschließen", value=bool(pool.get("exclude_hintergrund")), key=f"{prefix}_p{i}_excl_hintergr", disabled=is_auto_type)
                 pool["exclude_hintergrund"] = excl_hintergrund
-
-                # Ausgeschlossene Personen
                 current_excluded = pool.get("exclude_names") or []
-                excluded_names = st.multiselect(
-                    "Ausgeschlossene Personen",
-                    options=all_staff_names,
-                    default=[n for n in current_excluded if n in all_staff_names],
-                    key=f"{prefix}_p{i}_excl_names",
-                    help="Personen, die von diesem Pool ausgeschlossen sind.",
-                )
+                excluded_names = st.multiselect("Ausgeschlossene Personen", options=all_staff_names, default=[n for n in current_excluded if n in all_staff_names], key=f"{prefix}_p{i}_excl_names")
                 pool["exclude_names"] = excluded_names if excluded_names else None
-
-                # Exclude if day
-                eid_str = st.text_input(
-                    "Ausschluss pro Tag",
-                    value=_exclude_if_day_to_str(pool.get("exclude_if_day")),
-                    key=f"{prefix}_p{i}_eid",
-                    help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'",
-                )
+                eid_str = st.text_input("Ausschluss pro Tag", value=_exclude_if_day_to_str(pool.get("exclude_if_day")), key=f"{prefix}_p{i}_eid", help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'")
                 pool["exclude_if_day"] = _str_to_exclude_if_day(eid_str)
-
-                # Pool removal button - only shown on last pool if there's more than 1
                 if i == len(pools) - 1 and len(pools) > 1:
-                    if st.button(
-                        "Pool entfernen", 
-                        key=f"{prefix}_p{i}_remove",
-                        help="Entfernt den letzten Pool.",
-                    ):
-                        pools.pop(i)
-                        cfg["pools"] = pools
-                        save_meeting_pools(pools_data)
-                        st.rerun()
+                    if st.button("Pool entfernen", key=f"{prefix}_p{i}_remove"):
+                        pools.pop(i); cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
 
             if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
-                pools.append({
-                    "type": "names",
-                    "names": [],
-                    "site": cfg.get("site", "BH"),
-                })
-                cfg["pools"] = pools
-                save_meeting_pools(pools_data)
-                st.rerun()
+                pools.append({"type": "names", "names": [], "site": cfg.get("site", "BH")})
+                cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
 
-            # Fallback fields
             st.markdown("---")
             st.markdown("**Fallback-Einstellungen**")
             c1, c2 = st.columns(2)
-            cfg["fallback_text"] = c1.text_input(
-                "Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"),
-                key=f"{prefix}_fb_text",
-            )
-            cfg["roter_fallback_text"] = c2.checkbox(
-                "Roter Text", value=cfg.get("roter_fallback_text", True),
-                key=f"{prefix}_fb_rot",
-            )
-
+            cfg["fallback_text"] = c1.text_input("Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"), key=f"{prefix}_fb_text")
+            cfg["roter_fallback_text"] = c2.checkbox("Roter Text", value=cfg.get("roter_fallback_text", True), key=f"{prefix}_fb_rot")
             cfg["pools"] = pools
+            pools_data[meeting_key] = cfg
 
     st.divider()
-    if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_btn"):
-        # Validate pools before saving
+    if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_bh_btn"):
         validation_errors = []
-        for meeting_key, cfg in pools_data.items():
+        for meeting_key, cfg in site_pools.items():
             for i, pool in enumerate(cfg.get("pools", []), start=1):
                 if pool.get("type") == "names" and not pool.get("names"):
-                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Person' hat keine Namen ausgewählt. Bitte Namen auswählen oder Typ ändern.")
+                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Person' hat keine Namen ausgewählt.")
                 if pool.get("type") == "group" and not pool.get("group"):
                     validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Gruppe' hat keine Gruppe ausgewählt.")
-        
         if validation_errors:
-            st.error("**Validierungsfehler - Speichern nicht möglich:**")
-            for err in validation_errors:
-                st.error(f"• {err}")
+            st.error("**Validierungsfehler:**")
+            for err in validation_errors: st.error(f"• {err}")
         else:
-            # Clean up None/empty values before saving
             for meeting_key, cfg in pools_data.items():
                 for pool in cfg.get("pools", []):
                     for k in list(pool.keys()):
@@ -1402,7 +1266,206 @@ elif page == "📊 Rapporte-Pools":
             save_meeting_pools(pools_data)
             st.success("Rapporte-Pools gespeichert und neu geladen.")
             st.rerun()
-    
+
+
+# ===========================================================================
+# TAB 6b — Rapporte-Pools LI
+# ===========================================================================
+
+elif page == "📊 Rapporte-Pools LI":
+    st.subheader("Rapporte-Pools — LI")
+    st.caption(
+        "Hier können die Prioritäts-Pools für LI-Rapporte bearbeitet werden. "
+        "Die Pools werden in der definierten Reihenfolge durchlaufen, bis eine "
+        "verfügbare Person gefunden wird."
+    )
+
+    pools_data = load_meeting_pools()
+    site_pools = {k: v for k, v in pools_data.items() if v.get("site") == "LI"}
+
+    for meeting_key, cfg in site_pools.items():
+        with st.expander(meeting_key):
+            prefix = meeting_key.replace("|", "_").replace(" ", "_").replace(":", "").replace("/", "_").replace("(", "").replace(")", "")
+            pools = cfg.get("pools", [])
+            all_staff_names = sorted(sched.staff_by_name.keys())
+
+            for i, pool in enumerate(pools):
+                st.markdown(f"<span style='font-size:1.05rem; font-weight:700; color:#4A90D9;'>Pool {i+1}</span>", unsafe_allow_html=True)
+                st.markdown("---")
+                pc1, pc2, pc3 = st.columns(3)
+                current_type = pool.get("type", "names")
+                type_display_idx = _POOL_TYPES.index(current_type) if current_type in _POOL_TYPES else 0
+                pool_type_display = pc1.selectbox("Typ", options=_POOL_TYPES_DISPLAY, index=type_display_idx, key=f"{prefix}_p{i}_type")
+                pool_type = _POOL_TYPES[_POOL_TYPES_DISPLAY.index(pool_type_display)]
+                pool["type"] = pool_type
+                pool_site = pc2.selectbox("Standort", options=_SITE_OPTIONS, index=_SITE_OPTIONS.index(pool.get("site", cfg.get("site", "LI"))), key=f"{prefix}_p{i}_site")
+                pool["site"] = pool_site
+                roter_text = pc3.checkbox("Roter Text", value=(pool.get("style") == "red_bold"), key=f"{prefix}_p{i}_rot")
+                pool["style"] = "red_bold" if roter_text else None
+                if pool_type == "names":
+                    current_names = pool.get("names") or []
+                    selected_names = st.multiselect("Namen", options=all_staff_names, default=[n for n in current_names if n in all_staff_names], key=f"{prefix}_p{i}_names")
+                    pool["names"] = selected_names if selected_names else []
+                if pool_type == "group":
+                    current_group = pool.get("group", "AA")
+                    group_display_idx = _GROUP_OPTIONS.index(current_group) if current_group in _GROUP_OPTIONS else 0
+                    pool_group_display = st.selectbox("Gruppe", options=_GROUP_DISPLAY, index=group_display_idx, key=f"{prefix}_p{i}_group")
+                    pool["group"] = _GROUP_OPTIONS[_GROUP_DISPLAY.index(pool_group_display)]
+                if pool_type == "hintergrund_vortag":
+                    st.caption("Person wird automatisch aus dem Hintergrund-Dienst des Vortags bestimmt.")
+                is_auto_type = pool_type in ("spaetdienst_aa", "hintergrund_vortag")
+                cb_col1, cb_col2 = st.columns(2)
+                excl_spaet = cb_col1.checkbox("Spätdienst ausschließen", value=bool(pool.get("exclude_spaetdienst")), key=f"{prefix}_p{i}_excl_spaet", disabled=is_auto_type)
+                pool["exclude_spaetdienst"] = pool_site if excl_spaet else None
+                excl_hintergrund = cb_col2.checkbox("Hintergrund ausschließen", value=bool(pool.get("exclude_hintergrund")), key=f"{prefix}_p{i}_excl_hintergr", disabled=is_auto_type)
+                pool["exclude_hintergrund"] = excl_hintergrund
+                current_excluded = pool.get("exclude_names") or []
+                excluded_names = st.multiselect("Ausgeschlossene Personen", options=all_staff_names, default=[n for n in current_excluded if n in all_staff_names], key=f"{prefix}_p{i}_excl_names")
+                pool["exclude_names"] = excluded_names if excluded_names else None
+                eid_str = st.text_input("Ausschluss pro Tag", value=_exclude_if_day_to_str(pool.get("exclude_if_day")), key=f"{prefix}_p{i}_eid", help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'")
+                pool["exclude_if_day"] = _str_to_exclude_if_day(eid_str)
+                if i == len(pools) - 1 and len(pools) > 1:
+                    if st.button("Pool entfernen", key=f"{prefix}_p{i}_remove"):
+                        pools.pop(i); cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
+
+            if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
+                pools.append({"type": "names", "names": [], "site": cfg.get("site", "LI")})
+                cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
+
+            st.markdown("---")
+            st.markdown("**Fallback-Einstellungen**")
+            c1, c2 = st.columns(2)
+            cfg["fallback_text"] = c1.text_input("Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"), key=f"{prefix}_fb_text")
+            cfg["roter_fallback_text"] = c2.checkbox("Roter Text", value=cfg.get("roter_fallback_text", True), key=f"{prefix}_fb_rot")
+            cfg["pools"] = pools
+            pools_data[meeting_key] = cfg
+
+    st.divider()
+    if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_li_btn"):
+        validation_errors = []
+        for meeting_key, cfg in site_pools.items():
+            for i, pool in enumerate(cfg.get("pools", []), start=1):
+                if pool.get("type") == "names" and not pool.get("names"):
+                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Person' hat keine Namen ausgewählt.")
+                if pool.get("type") == "group" and not pool.get("group"):
+                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Gruppe' hat keine Gruppe ausgewählt.")
+        if validation_errors:
+            st.error("**Validierungsfehler:**")
+            for err in validation_errors: st.error(f"• {err}")
+        else:
+            for meeting_key, cfg in pools_data.items():
+                for pool in cfg.get("pools", []):
+                    for k in list(pool.keys()):
+                        if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
+                            if k not in ("type", "names", "group", "site", "exclude_hintergrund"):
+                                del pool[k]
+            save_meeting_pools(pools_data)
+            st.success("Rapporte-Pools gespeichert und neu geladen.")
+            st.rerun()
+
+
+# ===========================================================================
+# TAB 7 — Frontarzt
+# ===========================================================================
+
+elif page == "🩺 Frontarzt":
+    st.subheader("Frontarzt-Einstellungen")
+    st.caption("Ausschlussregeln und standortspezifische Einstellungen für Frontarztdienste.")
+
+    _fr_rules_path = Path(sched._staff_json).parent / "fr_rules.json"
+
+    def _load_fr_rules_ui() -> dict:
+        if _fr_rules_path.exists():
+            with open(_fr_rules_path, encoding="utf-8") as f:
+                return json.load(f)
+        return {"exclude_names": [], "exclude_if_day": {}, "exclude_from_frontarzt": []}
+
+    def _save_fr_rules_ui(data: dict) -> None:
+        with open(_fr_rules_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        sched.reload_fr_rules()
+
+    fr_rules = _load_fr_rules_ui()
+    all_staff_names = sorted(sched.staff_by_name.keys())
+    og_list = sched.OG_LIST
+
+    # ---- Standort-spezifische Regeln (moved from Personalverwaltung) ----
+    st.markdown("### Standort-spezifische Regeln")
+    site_rules = sched.SITE_RULES if sched.SITE_RULES else {
+        "BH": {"no_oa_vormittag": False},
+        "LI": {"no_oa_vormittag": True}
+    }
+    src1, src2 = st.columns(2)
+    bh_no_oa = src1.checkbox(
+        "BH: Kein OA im Frontarzt-Vormittagsdienst",
+        value=site_rules.get("BH", {}).get("no_oa_vormittag", False),
+        key="bh_no_oa_vormittag",
+        help="Wenn aktiviert: erste FR-Zelle BH nur mit LA besetzt."
+    )
+    li_no_oa = src2.checkbox(
+        "LI: Kein OA im Frontarzt-Vormittagsdienst",
+        value=site_rules.get("LI", {}).get("no_oa_vormittag", True),
+        key="li_no_oa_vormittag",
+        help="Wenn aktiviert: erste FR-Zelle LI nur mit LA besetzt."
+    )
+
+    st.divider()
+
+    # ---- Ausgeschlossene Personen ----
+    st.markdown("### Ausgeschlossene Personen")
+    excl_names = st.multiselect(
+        "Personen die nie als Frontarzt eingeteilt werden",
+        options=all_staff_names,
+        default=[n for n in fr_rules.get("exclude_names", []) if n in all_staff_names],
+        key="fr_excl_names",
+    )
+
+    # ---- Ausschluss pro Tag ----
+    st.markdown("### Ausschluss pro Tag")
+    eid_str = st.text_input(
+        "Ausschluss pro Tag",
+        value=_exclude_if_day_to_str(fr_rules.get("exclude_if_day")),
+        key="fr_excl_per_day",
+        help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'",
+    )
+
+    st.divider()
+
+    # ---- Von Frontarzt ausschließen (OG-based) ----
+    st.markdown("### Von Frontarzt ausschließen")
+    st.caption("OGs deren Mitglieder nie als Frontarzt eingeteilt werden")
+    excl_og = st.multiselect(
+        "OGs auswählen",
+        options=og_list,
+        default=[o for o in fr_rules.get("exclude_from_frontarzt", []) if o in og_list],
+        key="fr_excl_og",
+    )
+
+    st.divider()
+
+    if st.button("Frontarzt-Einstellungen speichern", type="primary", key="save_fr_rules_btn"):
+        # Save site rules into staff.json
+        new_site_rules = {
+            "BH": {"no_oa_vormittag": bh_no_oa},
+            "LI": {"no_oa_vormittag": li_no_oa},
+        }
+        sched.SITE_RULES.update(new_site_rules)
+        # Read current staff.json and update site_rules
+        _staff_path = Path(sched._staff_json)
+        with open(_staff_path, encoding="utf-8") as f:
+            staff_json = json.load(f)
+        staff_json["site_rules"] = new_site_rules
+        with open(_staff_path, "w", encoding="utf-8") as f:
+            json.dump(staff_json, f, ensure_ascii=False, indent=2)
+
+        # Save fr_rules.json
+        _save_fr_rules_ui({
+            "exclude_names": excl_names,
+            "exclude_if_day": _str_to_exclude_if_day(eid_str) or {},
+            "exclude_from_frontarzt": excl_og,
+        })
+        st.success("Frontarzt-Einstellungen gespeichert.")
+        st.rerun()
 
 
 # ===========================================================================

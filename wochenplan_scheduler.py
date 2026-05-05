@@ -103,6 +103,31 @@ OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR
 OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
 
 
+def _load_fr_rules() -> tuple:
+    _path = Path(__file__).parent / "fr_rules.json"
+    if not _path.exists():
+        return [], {}, set()
+    with open(_path, encoding="utf-8") as f:
+        _r = json.load(f)
+    return (
+        list(_r.get("exclude_names", [])),
+        {k: set(v) for k, v in _r.get("exclude_if_day", {}).items()},
+        set(_r.get("exclude_from_frontarzt", [])),
+    )
+
+FR_EXCLUDE_NAMES:        List[str]            = []
+FR_EXCLUDE_IF_DAY:       Dict[str, Set[str]]  = {}
+FR_EXCLUDE_FROM_OG:      Set[str]             = set()
+
+def reload_fr_rules() -> None:
+    """Reload FR rules from fr_rules.json — call after saving via UI."""
+    global FR_EXCLUDE_NAMES, FR_EXCLUDE_IF_DAY, FR_EXCLUDE_FROM_OG
+    FR_EXCLUDE_NAMES, FR_EXCLUDE_IF_DAY, FR_EXCLUDE_FROM_OG = _load_fr_rules()
+
+# Initial load
+FR_EXCLUDE_NAMES, FR_EXCLUDE_IF_DAY, FR_EXCLUDE_FROM_OG = _load_fr_rules()
+
+
 
 # ---------------- Data model ----------------
 
@@ -505,55 +530,26 @@ def print_weekly_stats():
 
 # ---------------- FR (Frontarzt) ----------------
 
-def get_persons_assigned_to_laufen(ws: Worksheet) -> Dict[str, Set[str]]:
-    """
-    Read names listed in the Laufen OG cells.
-    Returns: {weekday -> set(names)}
-    """
-    out: Dict[str, Set[str]] = {d: set() for d in WEEKDAYS}
-
-    cells_map = OG_CELLS.get("Laufen", {})
-    for day in WEEKDAYS:
-        cells = cells_map.get(day, tuple())
-        # Defensive: coerce single strings to tuples if someone edits accidentally
-        if isinstance(cells, str):
-            cells = (cells,)
-        for a1 in cells:
-            if not isinstance(a1, str):
-                continue
-            v = ws[a1].value
-            if isinstance(v, str):
-                name = v.strip()
-                if name:
-                    out[day].add(name)
-    return out
-
-def absences_for_fr_stage(ws: Worksheet, absences_orig: Dict[str, Set[str]],
-                          extra_exclusions: Optional[Dict[str, Set[str]]] = None,
-                          include_laufen_from_og: bool = True) -> Dict[str, Set[str]]:
-    abs_fr = {d: set(absences_orig.get(d, set())) for d in WEEKDAYS}
-
-    if include_laufen_from_og:
-        laufen = get_persons_assigned_to_laufen(ws)
-        for d in WEEKDAYS:
-            abs_fr[d].update(laufen.get(d, set()))
-
-    if extra_exclusions:
-        for d in WEEKDAYS:
-            abs_fr[d].update(extra_exclusions.get(d, set()))
-
-    return abs_fr
-
 def pick_fa_for_fr_shift(day: str, fa_pool: list,
                           absences_by_day: dict,
                           avoid=None,
-                          rng: random.Random = random):
+                          rng: random.Random = random,
+                          fr_og_excluded: Optional[Set[str]] = None):
     avoid = set(avoid or [])
     present = []
+    globally_excluded = set(FR_EXCLUDE_NAMES)
+    day_excluded = FR_EXCLUDE_IF_DAY.get(day, set())
+
     for n in fa_pool:
         if n in avoid:
             continue
         if n in absences_by_day.get(day, set()):
+            continue
+        if n in globally_excluded:
+            continue
+        if n in day_excluded:
+            continue
+        if fr_og_excluded and n in fr_og_excluded:
             continue
         s = staff_by_name.get(n)
         if not s:
@@ -577,37 +573,51 @@ def assign_fr_shifts_to_cells(
     rng: random.Random,
     *,
     extra_exclusions: Optional[Dict[str, Set[str]]] = None,
-    include_laufen_from_og: bool = True,
 ) -> None:
-    abs_fr = absences_for_fr_stage(ws, absences_orig,
-                                   extra_exclusions=extra_exclusions,
-                                   include_laufen_from_og=include_laufen_from_og)
+    # Build absence dict — extra_exclusions merged in if provided
+    abs_fr: Dict[str, Set[str]] = {d: set(absences_orig.get(d, set())) for d in WEEKDAYS}
+    if extra_exclusions:
+        for d in WEEKDAYS:
+            abs_fr[d].update(extra_exclusions.get(d, set()))
+
+    # Build per-day set of persons assigned to any OG excluded from Frontarzt
+    fr_og_excluded_by_day: Dict[str, Set[str]] = {d: set() for d in WEEKDAYS}
+    for og in FR_EXCLUDE_FROM_OG:
+        if og not in OG_CELLS:
+            continue
+        for day in WEEKDAYS:
+            for a1 in OG_CELLS[og].get(day, ()):
+                v = ws[a1].value
+                if isinstance(v, str) and v.strip():
+                    fr_og_excluded_by_day[day].add(v.strip())
 
     for day in WEEKDAYS:
         if day in FEIERTAGE:
             continue  # Skip holidays
-        
+
+        fr_og_excl = fr_og_excluded_by_day.get(day)
+
         # BH: Process all cells
         used = set()
         bh_no_oa_vormittag = SITE_RULES.get("BH", {}).get("no_oa_vormittag", False)
-        
+
         if bh_no_oa_vormittag and FR_CELLS["BH"][day]:
             # First cell: LA only
             top_cell = FR_CELLS["BH"][day][0]
-            pick, _ = pick_fa_for_fr_shift(day, la_bh, abs_fr, used, rng)
+            pick, _ = pick_fa_for_fr_shift(day, la_bh, abs_fr, used, rng, fr_og_excl)
             ws[top_cell].value = pick or ""
             if pick:
                 used.add(pick)
             # Remaining cells: all FA
             for a1 in FR_CELLS["BH"][day][1:]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng)
+                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
         else:
             # All cells: all FA
             for a1 in FR_CELLS["BH"][day]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng)
+                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
@@ -615,24 +625,24 @@ def assign_fr_shifts_to_cells(
         # LI: Same logic
         used = set()
         li_no_oa_vormittag = SITE_RULES.get("LI", {}).get("no_oa_vormittag", True)
-        
+
         if li_no_oa_vormittag and FR_CELLS["LI"][day]:
             # First cell: LA only
             top_cell = FR_CELLS["LI"][day][0]
-            pick, _ = pick_fa_for_fr_shift(day, la_li, abs_fr, used, rng)
+            pick, _ = pick_fa_for_fr_shift(day, la_li, abs_fr, used, rng, fr_og_excl)
             ws[top_cell].value = pick or ""
             if pick:
                 used.add(pick)
             # Remaining cells: all FA
             for a1 in FR_CELLS["LI"][day][1:]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng)
+                pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
         else:
             # All cells: all FA
             for a1 in FR_CELLS["LI"][day]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng)
+                pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
