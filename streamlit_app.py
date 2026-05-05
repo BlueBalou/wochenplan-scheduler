@@ -474,7 +474,7 @@ page = st.sidebar.radio(
         "📊 Rapporte verwalten",
         "📊 Rapporte-Pools BH",
         "📊 Rapporte-Pools LI",
-        "🩺 Frontarzt",
+        "👨‍⚕️ Frontarzt",
         "🏥 Organgruppen Verwalten",
         "🏥 Organgruppen Regeln",
         "🔧 Layout-Editor"
@@ -1368,7 +1368,7 @@ elif page == "📊 Rapporte-Pools LI":
 # TAB 7 — Frontarzt
 # ===========================================================================
 
-elif page == "🩺 Frontarzt":
+elif page == "👨‍⚕️ Frontarzt":
     st.subheader("Frontarzt-Einstellungen")
     st.caption("Ausschlussregeln und standortspezifische Einstellungen für Frontarztdienste.")
 

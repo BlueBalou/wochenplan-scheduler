@@ -6,4 +6,5 @@ layout.json
 bezeichnungen.json
 og_rules.json
 organgruppen.json
+fr_rules.json
 KW_xx_TEMPLATE.xlsm

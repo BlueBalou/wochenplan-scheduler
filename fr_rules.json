@@ -1,13 +1,7 @@
 {
   "exclude_names": [],
-  "exclude_if_day": {
-    "Dienstag": [
-      "S. Vitéz",
-      "M. Wildt",
-      "S. Pali"
-    ]
-  },
+  "exclude_if_day": {},
   "exclude_from_frontarzt": [
-    "Thorax"
+    "Laufen"
   ]
 }
