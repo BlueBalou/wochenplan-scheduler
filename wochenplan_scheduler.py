@@ -763,25 +763,36 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
         pool = set(present_oas)
         
         while pool:
-            # 1. Find OGs with free slots and under max_fas limit
-            available_ogs = [og for og in OG_LIST 
+            # 1. Find OGs with free slots.
+            # Cap (OG_MAX_FAS) is bypassed for an OG if at least one person in the
+            # pool has a rotation in that specific OG — they are only blocked by the
+            # cap, not by any other OG being understaffed.
+            available_ogs = [og for og in OG_LIST
                            if og not in OG_ROTATION_OR_LEADER_ONLY
                            and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
-                           and (OG_MAX_FAS.get(og) is None or FA_COUNTS[day][og] < OG_MAX_FAS[og])]
-            
+                           and (
+                               OG_MAX_FAS.get(og) is None
+                               or FA_COUNTS[day][og] < OG_MAX_FAS[og]
+                               or any(og in staff_by_name[n].rotations for n in pool)
+                           )]
+
             if not available_ogs:
                 break  # No free slots
-            
-            # 2. For each OG: Find compatible persons (counter + weight <= 1.0 AND not already in this OG)
+
+            # 2. For each OG: Find compatible persons (counter + weight <= 1.0 AND not already in this OG).
+            # When the cap is reached, only rotation-matched candidates may be placed.
             og_candidates = {}
             for og in available_ogs:
                 og_weight = OG_WEIGHTS_OA.get(og, 0.6)
-                compatible = [n for n in pool 
+                cap = OG_MAX_FAS.get(og)
+                cap_reached = cap is not None and FA_COUNTS[day][og] >= cap
+                compatible = [n for n in pool
                             if staff_by_name[n].og_nonleader_count + og_weight <= 1.0
-                            and not _already_listed(ws, OG_CELLS[og][day], n)]
+                            and not _already_listed(ws, OG_CELLS[og][day], n)
+                            and (not cap_reached or og in staff_by_name[n].rotations)]
                 if compatible:
                     og_candidates[og] = compatible
-            
+
             if not og_candidates:
                 break  # No compatible OG-person combinations
             
@@ -849,21 +860,30 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
         pool = set(present_aas)
         
         while pool:
-            # Same logic as OAs, but using aa_og_count and checking max_aas
-            available_ogs = [og for og in OG_LIST 
+            # Same logic as OAs, but using aa_og_count and checking max_aas.
+            # Cap (OG_MAX_AAS) is bypassed for an OG if at least one person in the
+            # pool has a rotation in that specific OG.
+            available_ogs = [og for og in OG_LIST
                            if og not in OG_ROTATION_OR_LEADER_ONLY
                            and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
-                           and (OG_MAX_AAS.get(og) is None or AA_COUNTS[day][og] < OG_MAX_AAS[og])]
-            
+                           and (
+                               OG_MAX_AAS.get(og) is None
+                               or AA_COUNTS[day][og] < OG_MAX_AAS[og]
+                               or any(og in staff_by_name[n].rotations for n in pool)
+                           )]
+
             if not available_ogs:
                 break
-            
+
             og_candidates = {}
             for og in available_ogs:
                 og_weight = OG_WEIGHTS_AA.get(og, 0.6)
-                compatible = [n for n in pool 
+                cap = OG_MAX_AAS.get(og)
+                cap_reached = cap is not None and AA_COUNTS[day][og] >= cap
+                compatible = [n for n in pool
                             if staff_by_name[n].aa_og_count + og_weight <= 1.0
-                            and not _already_listed(ws, OG_CELLS[og][day], n)]
+                            and not _already_listed(ws, OG_CELLS[og][day], n)
+                            and (not cap_reached or og in staff_by_name[n].rotations)]
                 if compatible:
                     og_candidates[og] = compatible
             
@@ -1402,79 +1422,100 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     if len(mondays) == 0:
         raise ValueError("No Monday found in CSV - cannot determine week start")
     monday_date = mondays.iloc[0]
-    
+
     # Write date to T20 (if date_cells exist in layout)
     if DATE_CELLS and "first_monday" in DATE_CELLS:
         ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%d/%m/%Y')
-    
+
     # Calculate and write KW (ISO week number)
     if DATE_CELLS and "kw_number" in DATE_CELLS:
         kw = monday_date.isocalendar()[1]
         ws[DATE_CELLS["kw_number"]].value = f"KW {kw}"
-    
+
     # Dienst type mapping — loaded from bezeichnungen.json
     _bez_path = Path(__file__).parent / "bezeichnungen.json"
     with open(_bez_path, encoding="utf-8") as _f:
         _bez = json.load(_f)
     ABSENZ_TYPES = set(_bez.get("absenz", []))
     SKIP_TYPES   = set(_bez.get("skip", []))   # EIR, PEPVIRTUELL etc. — ignore silently
-    
+
     # Day name mapping (German date to layout key)
     day_names = {
         0: "Montag", 1: "Dienstag", 2: "Mittwoch",
         3: "Donnerstag", 4: "Freitag", 5: "Samstag", 6: "Sonntag"
     }
-    
+
+    # --- Pass 1: prior weekend only (Saturday and Sunday before Monday) ----------
+    # Populate HINTERGRUND_BY_DAY from the preceding Sat/Sun so that Monday's
+    # rapport exclusion logic (_filter_candidates exclude_hintergrund) works
+    # correctly. Nothing from these two days is written to any Excel cell.
+    HINTERGRUND_BY_DAY.clear()
+    prior_weekend = df[df['Datum'] < monday_date]
+    for _, row in prior_weekend.iterrows():
+        dienst_type = row['Bezeichnung'].strip() if isinstance(row['Bezeichnung'], str) else row['Bezeichnung']
+        if dienst_type in SKIP_TYPES:
+            continue
+        csv_name = row['Suchname']
+        matched_name = match_csv_name_to_staff(csv_name)
+        if not matched_name:
+            continue
+        day_name = day_names[row['Datum'].dayofweek]
+        if "Pikett_24h_Sa/So" in dienst_type or "Pikett_Nacht_Mo-Fr" in dienst_type:
+            HINTERGRUND_BY_DAY[day_name] = matched_name
+
+    # --- Pass 2: current week (Monday through Sunday) — cell writes --------------
+    # All normal processing: absences, Nacht, Spät, Vordergrund, Hintergrund.
+    # Rows from the prior weekend are excluded so they never reach any Excel cell.
+    df_week = df[df['Datum'] >= monday_date]
+
     # Collect data by day and type
     absences_by_day = {d: [] for d in day_names.values()}
     nacht_by_day = {}
     spaet_by_day = {"BH": {}, "LI": {}}
     vordergrund_by_day = {}
     hintergrund_by_day = {}
-    HINTERGRUND_BY_DAY.clear()
-    
-    # Process each row
-    for _, row in df.iterrows():
-        dienst_type = row['Bezeichnung']
+
+    for _, row in df_week.iterrows():
+        dienst_type = row['Bezeichnung'].strip() if isinstance(row['Bezeichnung'], str) else row['Bezeichnung']
         csv_name = row['Suchname']
         date = row['Datum']
         day_name = day_names[date.dayofweek]
-        
+
         # Convert name format - match to staff.json
         matched_name = match_csv_name_to_staff(csv_name)
         if not matched_name:
             print(f"Skipping unknown person from CSV: {csv_name}")
             continue
         abbrev_name = matched_name
-        
+
         # Categorize dienst
         if dienst_type in SKIP_TYPES:
             continue  # EIR, PEPVIRTUELL etc. — ignore entirely
 
         elif dienst_type in ABSENZ_TYPES:
             absences_by_day[day_name].append(abbrev_name)
-        
+
         elif "Nachtdienst" in dienst_type:
             nacht_by_day[day_name] = abbrev_name
-        
+
         elif "Spätdienst" in dienst_type:
             site = "BH" if dienst_type.startswith("Bh-") else "LI"
             spaet_by_day[site][day_name] = abbrev_name
-        
+
         # Vordergrunddienst - specific weekend dienste
         elif "Pikett_Vormittag_Sa/So" in dienst_type:
             vordergrund_by_day[day_name] = abbrev_name
-        
+
         elif "Tagdienst Sa/So" in dienst_type:
             vordergrund_by_day[day_name] = abbrev_name
-        
+
         # Hintergrunddienst Nacht Mo-Fr: stored under the weekday it occurs
         elif "Pikett_Nacht_Mo-Fr" in dienst_type:
             hintergrund_by_day[day_name] = abbrev_name
             HINTERGRUND_BY_DAY[day_name] = abbrev_name
 
         # Hintergrunddienst 24h Sa/So: stored under the day it occurs (e.g. "Sonntag")
-        # so Monday's D-1 lookup finds it under "Sonntag"
+        # so next Monday's D-1 lookup finds it under "Sonntag"
         elif "Pikett_24h_Sa/So" in dienst_type:
             hintergrund_by_day[day_name] = abbrev_name
             HINTERGRUND_BY_DAY[day_name] = abbrev_name

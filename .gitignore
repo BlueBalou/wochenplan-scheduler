@@ -11,6 +11,7 @@ bezeichnungen.json
 og_rules.json
 organgruppen.json
 fr_rules.json
+stats.json
 
 # Python
 __pycache__/
