@@ -474,6 +474,7 @@ page = st.sidebar.radio(
         "📊 Rapporte verwalten",
         "📊 Rapporte-Pools BH",
         "📊 Rapporte-Pools LI",
+        "📈 Rapport-Statistik",
         "👨‍⚕️ Frontarzt",
         "🏥 Organgruppen Verwalten",
         "🏥 Organgruppen Regeln",
@@ -1241,6 +1242,46 @@ elif page == "📊 Rapporte-Pools BH":
             c1, c2 = st.columns(2)
             cfg["fallback_text"] = c1.text_input("Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"), key=f"{prefix}_fb_text")
             cfg["roter_fallback_text"] = c2.checkbox("Roter Text", value=cfg.get("roter_fallback_text", True), key=f"{prefix}_fb_rot")
+
+            st.markdown("---")
+            st.markdown("**Statistik-Einstellungen**")
+            stat_col1, stat_col2 = st.columns([1, 3])
+            statistik_führen = stat_col1.checkbox(
+                "Statistik führen",
+                value=cfg.get("statistik_führen", False),
+                key=f"{prefix}_statistik",
+                help="Wenn aktiviert, wird die Zuteilung dieses Rapports über Wochen hinweg verfolgt und ausgeglichen.",
+            )
+            cfg["statistik_führen"] = statistik_führen
+
+            if statistik_führen:
+                st.caption("Gewichtung pro Person (Standard 1.0). Niedrigere Werte bedeuten seltenere Zuteilung im Verhältnis zu anderen.")
+                all_pool_names = sorted({
+                    n for pool in cfg.get("pools", [])
+                    for n in (pool.get("names") or [])
+                    if pool.get("type") == "names"
+                })
+                current_weights = cfg.get("stats_weight", {})
+                new_weights = {}
+                if all_pool_names:
+                    sw_cols = st.columns(min(len(all_pool_names), 4))
+                    for i, name in enumerate(all_pool_names):
+                        with sw_cols[i % 4]:
+                            new_weights[name] = st.number_input(
+                                name,
+                                min_value=0.1,
+                                max_value=10.0,
+                                value=float(current_weights.get(name, 1.0)),
+                                step=0.1,
+                                format="%.1f",
+                                key=f"{prefix}_sw_{name}",
+                            )
+                else:
+                    st.caption("Keine Personen in 'Namen'-Pools gefunden. Bitte zuerst Pools vom Typ 'Person' mit Namen befüllen.")
+                cfg["stats_weight"] = new_weights
+            else:
+                cfg.pop("stats_weight", None)
+
             cfg["pools"] = pools
             pools_data[meeting_key] = cfg
 
@@ -1337,6 +1378,46 @@ elif page == "📊 Rapporte-Pools LI":
             c1, c2 = st.columns(2)
             cfg["fallback_text"] = c1.text_input("Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"), key=f"{prefix}_fb_text")
             cfg["roter_fallback_text"] = c2.checkbox("Roter Text", value=cfg.get("roter_fallback_text", True), key=f"{prefix}_fb_rot")
+
+            st.markdown("---")
+            st.markdown("**Statistik-Einstellungen**")
+            stat_col1, stat_col2 = st.columns([1, 3])
+            statistik_führen = stat_col1.checkbox(
+                "Statistik führen",
+                value=cfg.get("statistik_führen", False),
+                key=f"{prefix}_statistik",
+                help="Wenn aktiviert, wird die Zuteilung dieses Rapports über Wochen hinweg verfolgt und ausgeglichen.",
+            )
+            cfg["statistik_führen"] = statistik_führen
+
+            if statistik_führen:
+                st.caption("Gewichtung pro Person (Standard 1.0). Niedrigere Werte bedeuten seltenere Zuteilung im Verhältnis zu anderen.")
+                all_pool_names = sorted({
+                    n for pool in cfg.get("pools", [])
+                    for n in (pool.get("names") or [])
+                    if pool.get("type") == "names"
+                })
+                current_weights = cfg.get("stats_weight", {})
+                new_weights = {}
+                if all_pool_names:
+                    sw_cols = st.columns(min(len(all_pool_names), 4))
+                    for i, name in enumerate(all_pool_names):
+                        with sw_cols[i % 4]:
+                            new_weights[name] = st.number_input(
+                                name,
+                                min_value=0.1,
+                                max_value=10.0,
+                                value=float(current_weights.get(name, 1.0)),
+                                step=0.1,
+                                format="%.1f",
+                                key=f"{prefix}_sw_{name}",
+                            )
+                else:
+                    st.caption("Keine Personen in 'Namen'-Pools gefunden. Bitte zuerst Pools vom Typ 'Person' mit Namen befüllen.")
+                cfg["stats_weight"] = new_weights
+            else:
+                cfg.pop("stats_weight", None)
+
             cfg["pools"] = pools
             pools_data[meeting_key] = cfg
 
@@ -1828,3 +1909,151 @@ elif page == "🏥 Organgruppen Regeln":
 
 
 
+
+# ===========================================================================
+# PAGE — Rapport-Statistik
+# ===========================================================================
+
+elif page == "📈 Rapport-Statistik":
+    st.subheader("Rapport-Statistik")
+    st.caption(
+        "Zuteilungs-Verlauf für Rapporte mit aktivierter Statistik. "
+        "Einträge können manuell korrigiert werden."
+    )
+
+    STATS_JSON_PATH = Path(__file__).parent / "stats.json"
+
+    def _load_stats_ui() -> dict:
+        if not STATS_JSON_PATH.exists():
+            return {}
+        with open(STATS_JSON_PATH, encoding="utf-8") as f:
+            return json.load(f)
+
+    def _save_stats_ui(data: dict) -> None:
+        tmp = str(STATS_JSON_PATH) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, str(STATS_JSON_PATH))
+
+    pools_data = load_meeting_pools()
+    tracked = {k: v for k, v in pools_data.items() if v.get("statistik_führen")}
+
+    if not tracked:
+        st.info("Keine Rapporte mit aktivierter Statistik gefunden. "
+                "Statistik kann in den Rapporte-Pools unter 'Statistik-Einstellungen' aktiviert werden.")
+        st.stop()
+
+    stats = _load_stats_ui()
+
+    for meeting_key, cfg in tracked.items():
+        st.markdown(f"### {meeting_key}")
+
+        rapport_stats = stats.get(meeting_key, {})
+        stats_weight  = cfg.get("stats_weight", {})
+
+        # Collect all names from pools of type "names" — these are the tracked candidates
+        pool_names = sorted({
+            n for pool in cfg.get("pools", [])
+            for n in (pool.get("names") or [])
+            if pool.get("type") == "names"
+        })
+
+        if not pool_names:
+            st.caption("Keine Personen in 'Namen'-Pools.")
+            st.divider()
+            continue
+
+        # Build summary table
+        rows = []
+        for name in pool_names:
+            entry   = rapport_stats.get(name, {"count": 0, "history": []})
+            count   = entry.get("count", 0)
+            weight  = stats_weight.get(name, 1.0)
+            ratio   = round(count / weight, 2) if weight else "—"
+            rows.append({
+                "Name":                       name,
+                "Gewichtung":                 weight,
+                "Anzahl":                     count,
+                "Tatsächliche Verteilung":    ratio,
+            })
+
+        df_stats = pd.DataFrame(rows)
+        st.dataframe(df_stats, use_container_width=True, hide_index=True)
+
+        # Build chronological history table across all names
+        history_rows = []
+        for name in pool_names:
+            entry = rapport_stats.get(name, {"count": 0, "history": []})
+            for kw in entry.get("history", []):
+                history_rows.append({"KW": kw, "Person": name})
+
+        if history_rows:
+            history_rows.sort(key=lambda r: r["KW"])
+            df_history = pd.DataFrame(history_rows)
+            st.markdown("**Verlauf (chronologisch)**")
+            st.dataframe(df_history, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Noch keine Einträge vorhanden.")
+
+        # Manual correction expander
+        with st.expander(f"Einträge bearbeiten — {meeting_key}"):
+            edit_name = st.selectbox(
+                "Person auswählen",
+                options=pool_names,
+                key=f"stat_edit_name_{meeting_key}",
+            )
+            if edit_name:
+                current_entry  = rapport_stats.get(edit_name, {"count": 0, "history": []})
+                current_history = current_entry.get("history", [])
+
+                st.markdown(f"**Aktueller Verlauf für {edit_name}:** "
+                            f"{', '.join(current_history) if current_history else '—'}")
+
+                ec1, ec2 = st.columns(2)
+
+                # Add KW entry — year selector + KW dropdown
+                import datetime as _dt
+                _current_year = _dt.date.today().year
+                add_year = ec1.number_input(
+                    "Jahr",
+                    min_value=2020,
+                    max_value=_current_year + 1,
+                    value=_current_year,
+                    step=1,
+                    key=f"stat_add_year_{meeting_key}_{edit_name}",
+                )
+                kw_options = [f"{int(add_year)}-KW{k:02d}" for k in range(1, 54)]
+                add_kw = ec1.selectbox(
+                    "KW auswählen",
+                    options=kw_options,
+                    key=f"stat_add_kw_{meeting_key}_{edit_name}",
+                )
+                if ec1.button("Hinzufügen", key=f"stat_add_btn_{meeting_key}_{edit_name}"):
+                    entry = stats.setdefault(meeting_key, {}).setdefault(
+                        edit_name, {"count": 0, "history": []}
+                    )
+                    entry["history"].append(add_kw)
+                    entry["count"] = len(entry["history"])
+                    _save_stats_ui(stats)
+                    st.success(f"{add_kw} für {edit_name} hinzugefügt.")
+                    st.rerun()
+
+                # Remove KW entry
+                if current_history:
+                    remove_kw = ec2.selectbox(
+                        "KW entfernen",
+                        options=current_history,
+                        key=f"stat_remove_kw_{meeting_key}_{edit_name}",
+                    )
+                    if ec2.button("Entfernen", key=f"stat_remove_btn_{meeting_key}_{edit_name}"):
+                        entry = stats.setdefault(meeting_key, {}).setdefault(
+                            edit_name, {"count": 0, "history": []}
+                        )
+                        if remove_kw in entry["history"]:
+                            entry["history"].remove(remove_kw)
+                            entry["count"] = len(entry["history"])
+                            _save_stats_ui(stats)
+                            st.success(f"{remove_kw} für {edit_name} entfernt.")
+                            st.rerun()
+
+        st.divider()

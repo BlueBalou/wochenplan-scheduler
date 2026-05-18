@@ -270,6 +270,13 @@ FEIERTAGE_MERGE_CELLS: Dict[str, str]                                  = {}
 # _filter_candidates() looks up D-1 to exclude the person from meetings the next morning.
 HINTERGRUND_BY_DAY: Dict[str, str]                                     = {}
 
+# Set by fill_dienste_from_csv() — e.g. "2026-KW21". Used by assign_meetings() to
+# record stats for rapporte with statistik_führen=true. Empty string = no CSV loaded.
+CURRENT_KW: str = ""
+
+# Path to stats.json — cross-week assignment history for tracked rapporte.
+STATS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats.json")
+
 
 def load_layout_from_json(path: str) -> None:
     """Load all cell-map constants from layout.json, replacing current values."""
@@ -357,6 +364,75 @@ def reload_og_rules() -> None:
     global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA, OG_EXCLUDE_FROM_RAPPORTE
     OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OG_EXCLUDE_FROM_RAPPORTE = _load_og_rules()
     OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
+
+
+# ---------------- Stats (cross-week fairness for tracked rapporte) ----------------
+
+def load_stats() -> dict:
+    """Load stats.json, returning empty dict if the file does not exist yet."""
+    if not os.path.exists(STATS_JSON):
+        return {}
+    with open(STATS_JSON, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_stats(data: dict) -> None:
+    """Write stats.json atomically."""
+    tmp = STATS_JSON + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATS_JSON)
+
+
+def _stats_fair_pick(
+    meeting_key: str,
+    candidates: List[str],
+    kw_str: str,
+    rng: random.Random,
+    day: str,
+    stats_weight: Dict[str, float],
+) -> Optional[str]:
+    """
+    Cross-week fair pick for rapporte with statistik_führen=true.
+
+    Selection criterion: lowest (assignment_count / stats_weight) ratio.
+    stats_weight per person comes from meeting_pools.json (default 1.0).
+    Picks randomly among ties.
+
+    Writes the assignment to stats.json immediately after picking and
+    increments the in-week meetings_count_* counters so subsequent
+    rapporte in the same week see this person as already assigned.
+    """
+    if not candidates or not kw_str:
+        return None
+
+    stats = load_stats()
+    rapport_stats = stats.setdefault(meeting_key, {})
+
+    # Compute ratio for each candidate
+    def ratio(name: str) -> float:
+        count = rapport_stats.get(name, {}).get("count", 0)
+        weight = stats_weight.get(name, 1.0)
+        return count / weight if weight else float("inf")
+
+    min_ratio = min(ratio(n) for n in candidates)
+    bucket = [n for n in candidates if ratio(n) == min_ratio]
+    pick = rng.choice(bucket)
+
+    # Write to stats.json immediately
+    entry = rapport_stats.setdefault(pick, {"count": 0, "history": []})
+    entry["count"] += 1
+    entry["history"].append(kw_str)
+    save_stats(stats)
+
+    # Increment in-week counters (so other rapporte this week see this assignment)
+    staff_by_name[pick].meetings_count += 1
+    staff_by_name[pick].meetings_count_week += 1
+    day_counter_name = f"meetings_count_{day.lower()}"
+    setattr(staff_by_name[pick], day_counter_name,
+            getattr(staff_by_name[pick], day_counter_name, 0) + 1)
+
+    return pick
 
 
 def _clear_cells(ws: Worksheet, cells: Tuple[str, ...]):
@@ -1063,6 +1139,8 @@ def assign_meeting_by_pools(
     monday_style: Optional[str] = None,       # e.g., "red"
     fallback_text: Optional[str] = "FÄLLT AUS",
     fallback_style: Optional[str] = "red_bold",
+    statistik_führen: bool = False,
+    stats_weight: Optional[Dict[str, float]] = None,
 ):
     for a1 in cells:
         placed = False
@@ -1163,20 +1241,29 @@ def assign_meeting_by_pools(
                 exclude_hintergrund=pool.get("exclude_hintergrund", False),
             )
 
-            pick = _fair_pick_pool(meeting_key, idx, cands, rng, day)
+            # Pick: use cross-week stats ratio for tracked rapporte,
+            # within-week fairness counter for all others.
+            if statistik_führen and CURRENT_KW:
+                pick = _stats_fair_pick(
+                    meeting_key, cands, CURRENT_KW, rng, day,
+                    stats_weight or {},
+                )
+                # _stats_fair_pick already increments meetings_count_* counters
+                # and writes stats.json — nothing else needed here.
+            else:
+                pick = _fair_pick_pool(meeting_key, idx, cands, rng, day)
+                if pick:
+                    _bump_pool(meeting_key, idx, pick)
+                    staff_by_name[pick].meetings_count += 1
+                    staff_by_name[pick].meetings_count_week += 1
+                    day_counter_name = f"meetings_count_{day.lower()}"
+                    current_count = getattr(staff_by_name[pick], day_counter_name, 0)
+                    setattr(staff_by_name[pick], day_counter_name, current_count + 1)
+
             if pick:
                 _assign(ws, a1, pick, style)
                 if monday_style and day == "Montag":
                     if monday_style == "red": set_red(ws, a1)
-                _bump_pool(meeting_key, idx, pick)
-                
-                # Increment counters
-                staff_by_name[pick].meetings_count += 1  # Deprecated but kept for stats
-                staff_by_name[pick].meetings_count_week += 1
-                day_counter_name = f"meetings_count_{day.lower()}"
-                current_count = getattr(staff_by_name[pick], day_counter_name, 0)
-                setattr(staff_by_name[pick], day_counter_name, current_count + 1)
-                
                 placed = True
                 break
 
@@ -1215,6 +1302,12 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
         fallback_text      = cfg.get("fallback_text", "FÄLLT AUS")
         roter_fallback     = cfg.get("roter_fallback_text", True)
         fallback_style     = "red_bold" if roter_fallback else "black"
+        statistik_führen   = cfg.get("statistik_führen", False)
+        stats_weight       = cfg.get("stats_weight", {}) if statistik_führen else {}
+
+        if statistik_führen and not CURRENT_KW:
+            print(f"Warning: statistik_führen=true for '{meeting_key}' but CURRENT_KW is not set "
+                  f"(no CSV loaded?). Stats will not be recorded this run.")
 
         for day, cells in mtg_cells.items():
             if day in FEIERTAGE:
@@ -1228,6 +1321,8 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
                 rapporte_excluded_names=rapporte_excluded_by_day.get(day, set()),
                 monday_style=None,
                 fallback_text=fallback_text, fallback_style=fallback_style,
+                statistik_führen=statistik_führen,
+                stats_weight=stats_weight,
             )
 
 
@@ -1427,10 +1522,12 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     if DATE_CELLS and "first_monday" in DATE_CELLS:
         ws[DATE_CELLS["first_monday"]].value = monday_date.strftime('%d/%m/%Y')
 
-    # Calculate and write KW (ISO week number)
+    # Calculate and write KW (ISO week number); also set CURRENT_KW for stats tracking.
+    global CURRENT_KW
+    iso = monday_date.isocalendar()
+    CURRENT_KW = f"{iso[0]}-KW{iso[1]:02d}"
     if DATE_CELLS and "kw_number" in DATE_CELLS:
-        kw = monday_date.isocalendar()[1]
-        ws[DATE_CELLS["kw_number"]].value = f"KW {kw}"
+        ws[DATE_CELLS["kw_number"]].value = f"KW {iso[1]}"
 
     # Dienst type mapping — loaded from bezeichnungen.json
     _bez_path = Path(__file__).parent / "bezeichnungen.json"
