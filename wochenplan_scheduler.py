@@ -1164,7 +1164,7 @@ def assign_meeting_by_pools(
                 cands = _filter_candidates(
                     base, day=day, site=site, absences=absences,
                     spaetdienst_by_site_day=spaetdienst,
-                    exclude_names=set(pool.get("exclude_names", [])) or None,
+                    exclude_names=set(pool.get("exclude_names") or []) or None,
                     exclude_if_day={k: set(v) for k, v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
                     rapporte_excluded_names=rapporte_excluded_names,
                     exclude_hintergrund=False,
@@ -1204,7 +1204,7 @@ def assign_meeting_by_pools(
                         [candidate], day=day, site=site, absences=absences,
                         spaetdienst_by_site_day=spaetdienst,
                         exclude_spaetdienst=pool.get("exclude_spaetdienst"),
-                        exclude_names=set(pool.get("exclude_names", [])) or None,
+                        exclude_names=set(pool.get("exclude_names") or []) or None,
                         exclude_if_day={k: set(v) for k, v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
                         rapporte_excluded_names=rapporte_excluded_names,
                         exclude_hintergrund=False,  # Would be circular
@@ -1235,15 +1235,17 @@ def assign_meeting_by_pools(
                 base, day=day, site=site, absences=absences,
                 spaetdienst_by_site_day=spaetdienst,
                 exclude_spaetdienst=pool.get("exclude_spaetdienst"),
-                exclude_names=set(pool.get("exclude_names", [])) or None,
+                exclude_names=set(pool.get("exclude_names") or []) or None,
                 exclude_if_day={k:set(v) for k,v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
                 rapporte_excluded_names=rapporte_excluded_names,
                 exclude_hintergrund=pool.get("exclude_hintergrund", False),
             )
 
             # Pick: use cross-week stats ratio for tracked rapporte,
-            # within-week fairness counter for all others.
-            if statistik_führen and CURRENT_KW:
+            # UNLESS the winning pool is hintergrund_vortag — those picks are
+            # never recorded in stats (the person had no choice in being assigned).
+            pool_is_hintergrund = pool.get("type") == "hintergrund_vortag"
+            if statistik_führen and CURRENT_KW and not pool_is_hintergrund:
                 pick = _stats_fair_pick(
                     meeting_key, cands, CURRENT_KW, rng, day,
                     stats_weight or {},
@@ -1270,7 +1272,7 @@ def assign_meeting_by_pools(
         if not placed and fallback_text is not None:
             _assign(ws, a1, fallback_text, fallback_style)
 
-def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Random):
+def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Random, skip_stats: bool = False):
     write_medizin_placeholders_monday(ws)
 
     spaet = read_spaetdienst_by_day(ws)
@@ -1321,7 +1323,7 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
                 rapporte_excluded_names=rapporte_excluded_by_day.get(day, set()),
                 monday_style=None,
                 fallback_text=fallback_text, fallback_style=fallback_style,
-                statistik_führen=statistik_führen,
+                statistik_führen=statistik_führen and not skip_stats,
                 stats_weight=stats_weight,
             )
 
@@ -1611,11 +1613,12 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
             hintergrund_by_day[day_name] = abbrev_name
             HINTERGRUND_BY_DAY[day_name] = abbrev_name
 
-        # Hintergrunddienst 24h Sa/So: stored under the day it occurs (e.g. "Sonntag")
-        # so next Monday's D-1 lookup finds it under "Sonntag"
+        # Hintergrunddienst 24h Sa/So: write to Excel cell only.
+        # Do NOT update HINTERGRUND_BY_DAY here — Pass 1 already set it
+        # from the prior weekend. Overwriting it with the current week's
+        # Sat/Sun would corrupt Monday's exclusion lookup next week.
         elif "Pikett_24h_Sa/So" in dienst_type:
             hintergrund_by_day[day_name] = abbrev_name
-            HINTERGRUND_BY_DAY[day_name] = abbrev_name
 
         # Other Pikett types (e.g. Pikett_Vormittag) — write to Excel only
         elif "Pikett" in dienst_type:

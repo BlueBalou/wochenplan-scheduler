@@ -472,8 +472,7 @@ page = st.sidebar.radio(
         "📄 Wochenplan (Eigene Vorlage)", 
         "👥 Personalverwaltung",
         "📊 Rapporte verwalten",
-        "📊 Rapporte-Pools BH",
-        "📊 Rapporte-Pools LI",
+        "📊 Rapporte-Pools",
         "📈 Rapport-Statistik",
         "👨‍⚕️ Frontarzt",
         "🏥 Organgruppen Verwalten",
@@ -512,6 +511,11 @@ if page == "📋 Wochenplan (Standard)":
             key="seed_opt1"
         )
     
+    skip_stats_opt1 = st.checkbox(
+        "Keine Statistik speichern (Testlauf)",
+        value=False,
+        key="skip_stats_opt1",
+    )
     run_opt1 = st.button(
         "Wochenplan erstellen (mit Standard-Vorlage)",
         disabled=(csv_file_opt1 is None or not template_exists),
@@ -568,7 +572,7 @@ if page == "📋 Wochenplan (Standard)":
                 sched.assign_fr_shifts_to_cells(ws, absences, rng)
                 
                 # Stage 3: Meetings
-                sched.assign_meetings(ws, absences, rng)
+                sched.assign_meetings(ws, absences, rng, skip_stats=skip_stats_opt1)
                 
                 # Save
                 wb.save(output_tmp_path)
@@ -676,6 +680,11 @@ elif page == "📄 Wochenplan (Eigene Vorlage)":
             key="seed_opt2"
         )
     
+    skip_stats_opt2 = st.checkbox(
+        "Keine Statistik speichern (Testlauf)",
+        value=False,
+        key="skip_stats_opt2",
+    )
     run_opt2 = st.button(
         "Wochenplan erstellen (mit eigener Vorlage)",
         disabled=(csv_file_opt2 is None or template_file_opt2 is None),
@@ -737,7 +746,7 @@ elif page == "📄 Wochenplan (Eigene Vorlage)":
                 sched.assign_fr_shifts_to_cells(ws, absences, rng)
                 
                 # Stage 3: Meetings
-                sched.assign_meetings(ws, absences, rng)
+                sched.assign_meetings(ws, absences, rng, skip_stats=skip_stats_opt2)
                 
                 # Save
                 wb.save(output_tmp_path)
@@ -1174,275 +1183,208 @@ elif page == "🔧 Layout-Editor":
         st.rerun()
 
 # ===========================================================================
-# TAB 6a — Rapporte-Pools BH
+# TAB 6 — Rapporte-Pools (BH + LI)
 # ===========================================================================
 
-elif page == "📊 Rapporte-Pools BH":
-    st.subheader("Rapporte-Pools — BH")
+elif page == "📊 Rapporte-Pools":
+    st.subheader("Rapporte-Pools")
     st.caption(
-        "Hier können die Prioritäts-Pools für BH-Rapporte bearbeitet werden. "
         "Die Pools werden in der definierten Reihenfolge durchlaufen, bis eine "
         "verfügbare Person gefunden wird."
     )
 
     pools_data = load_meeting_pools()
-    site_pools = {k: v for k, v in pools_data.items() if v.get("site") == "BH"}
+    all_staff_names = sorted(sched.staff_by_name.keys())
 
-    for meeting_key, cfg in site_pools.items():
-        with st.expander(meeting_key):
-            prefix = meeting_key.replace("|", "_").replace(" ", "_").replace(":", "").replace("/", "_").replace("(", "").replace(")", "")
-            pools = cfg.get("pools", [])
-            all_staff_names = sorted(sched.staff_by_name.keys())
+    def _render_pool_editor(meeting_key: str, cfg: dict, default_site: str) -> None:
+        """Render all pools + settings for one rapport inside an active tab."""
+        prefix = (meeting_key
+                  .replace("|", "_").replace(" ", "_").replace(":", "")
+                  .replace("/", "_").replace("(", "").replace(")", ""))
+        pools = cfg.get("pools", [])
 
-            for i, pool in enumerate(pools):
-                st.markdown(f"<span style='font-size:1.05rem; font-weight:700; color:#4A90D9;'>Pool {i+1}</span>", unsafe_allow_html=True)
-                st.markdown("---")
+        for i, pool in enumerate(pools):
+            with st.container(border=True):
+                header_col, up_col, down_col = st.columns([8, 1, 1])
+                header_col.markdown(
+                    f"<span style='font-size:1.05rem; font-weight:700; color:#4A90D9;'>"
+                    f"Pool {i+1}</span>", unsafe_allow_html=True)
+                if i > 0:
+                    if up_col.button("↑", key=f"{prefix}_p{i}_up"):
+                        pools[i], pools[i-1] = pools[i-1], pools[i]
+                        cfg["pools"] = pools
+                        pools_data[meeting_key] = cfg
+                        save_meeting_pools(pools_data); st.rerun()
+                if i < len(pools) - 1:
+                    if down_col.button("↓", key=f"{prefix}_p{i}_down"):
+                        pools[i], pools[i+1] = pools[i+1], pools[i]
+                        cfg["pools"] = pools
+                        pools_data[meeting_key] = cfg
+                        save_meeting_pools(pools_data); st.rerun()
+
                 pc1, pc2, pc3 = st.columns(3)
                 current_type = pool.get("type", "names")
                 type_display_idx = _POOL_TYPES.index(current_type) if current_type in _POOL_TYPES else 0
-                pool_type_display = pc1.selectbox("Typ", options=_POOL_TYPES_DISPLAY, index=type_display_idx, key=f"{prefix}_p{i}_type")
+                pool_type_display = pc1.selectbox("Typ", options=_POOL_TYPES_DISPLAY,
+                    index=type_display_idx, key=f"{prefix}_p{i}_type")
                 pool_type = _POOL_TYPES[_POOL_TYPES_DISPLAY.index(pool_type_display)]
                 pool["type"] = pool_type
-                pool_site = pc2.selectbox("Standort", options=_SITE_OPTIONS, index=_SITE_OPTIONS.index(pool.get("site", cfg.get("site", "BH"))), key=f"{prefix}_p{i}_site")
+                pool_site = pc2.selectbox("Standort", options=_SITE_OPTIONS,
+                    index=_SITE_OPTIONS.index(pool.get("site", cfg.get("site", default_site))),
+                    key=f"{prefix}_p{i}_site")
                 pool["site"] = pool_site
-                roter_text = pc3.checkbox("Roter Text", value=(pool.get("style") == "red_bold"), key=f"{prefix}_p{i}_rot")
+                roter_text = pc3.checkbox("Roter Text",
+                    value=(pool.get("style") == "red_bold"), key=f"{prefix}_p{i}_rot")
                 pool["style"] = "red_bold" if roter_text else None
+
                 if pool_type == "names":
                     current_names = pool.get("names") or []
-                    selected_names = st.multiselect("Namen", options=all_staff_names, default=[n for n in current_names if n in all_staff_names], key=f"{prefix}_p{i}_names")
+                    selected_names = st.multiselect("Namen", options=all_staff_names,
+                        default=[n for n in current_names if n in all_staff_names],
+                        key=f"{prefix}_p{i}_names")
                     pool["names"] = selected_names if selected_names else []
                 if pool_type == "group":
                     current_group = pool.get("group", "AA")
                     group_display_idx = _GROUP_OPTIONS.index(current_group) if current_group in _GROUP_OPTIONS else 0
-                    pool_group_display = st.selectbox("Gruppe", options=_GROUP_DISPLAY, index=group_display_idx, key=f"{prefix}_p{i}_group")
+                    pool_group_display = st.selectbox("Gruppe", options=_GROUP_DISPLAY,
+                        index=group_display_idx, key=f"{prefix}_p{i}_group")
                     pool["group"] = _GROUP_OPTIONS[_GROUP_DISPLAY.index(pool_group_display)]
                 if pool_type == "hintergrund_vortag":
                     st.caption("Person wird automatisch aus dem Hintergrund-Dienst des Vortags bestimmt.")
+
                 is_auto_type = pool_type in ("spaetdienst_aa", "hintergrund_vortag")
                 cb_col1, cb_col2 = st.columns(2)
-                excl_spaet = cb_col1.checkbox("Spätdienst ausschließen", value=bool(pool.get("exclude_spaetdienst")), key=f"{prefix}_p{i}_excl_spaet", disabled=is_auto_type)
+                excl_spaet = cb_col1.checkbox("Spätdienst ausschließen",
+                    value=bool(pool.get("exclude_spaetdienst")),
+                    key=f"{prefix}_p{i}_excl_spaet", disabled=is_auto_type)
                 pool["exclude_spaetdienst"] = pool_site if excl_spaet else None
-                excl_hintergrund = cb_col2.checkbox("Hintergrund ausschließen", value=bool(pool.get("exclude_hintergrund")), key=f"{prefix}_p{i}_excl_hintergr", disabled=is_auto_type)
+                excl_hintergrund = cb_col2.checkbox("Hintergrund ausschließen",
+                    value=bool(pool.get("exclude_hintergrund")),
+                    key=f"{prefix}_p{i}_excl_hintergr", disabled=is_auto_type)
                 pool["exclude_hintergrund"] = excl_hintergrund
+
                 current_excluded = pool.get("exclude_names") or []
-                excluded_names = st.multiselect("Ausgeschlossene Personen", options=all_staff_names, default=[n for n in current_excluded if n in all_staff_names], key=f"{prefix}_p{i}_excl_names")
+                excluded_names = st.multiselect("Ausgeschlossene Personen",
+                    options=all_staff_names,
+                    default=[n for n in current_excluded if n in all_staff_names],
+                    key=f"{prefix}_p{i}_excl_names")
                 pool["exclude_names"] = excluded_names if excluded_names else None
-                eid_str = st.text_input("Ausschluss pro Tag", value=_exclude_if_day_to_str(pool.get("exclude_if_day")), key=f"{prefix}_p{i}_eid", help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'")
+
+                eid_str = st.text_input("Ausschluss pro Tag",
+                    value=_exclude_if_day_to_str(pool.get("exclude_if_day")),
+                    key=f"{prefix}_p{i}_eid",
+                    help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'")
                 pool["exclude_if_day"] = _str_to_exclude_if_day(eid_str)
+
                 if i == len(pools) - 1 and len(pools) > 1:
                     if st.button("Pool entfernen", key=f"{prefix}_p{i}_remove"):
-                        pools.pop(i); cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
+                        pools.pop(i)
+                        cfg["pools"] = pools
+                        save_meeting_pools(pools_data); st.rerun()
 
-            if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
-                pools.append({"type": "names", "names": [], "site": cfg.get("site", "BH")})
-                cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
-
-            st.markdown("---")
-            st.markdown("**Fallback-Einstellungen**")
-            c1, c2 = st.columns(2)
-            cfg["fallback_text"] = c1.text_input("Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"), key=f"{prefix}_fb_text")
-            cfg["roter_fallback_text"] = c2.checkbox("Roter Text", value=cfg.get("roter_fallback_text", True), key=f"{prefix}_fb_rot")
-
-            st.markdown("---")
-            st.markdown("**Statistik-Einstellungen**")
-            stat_col1, stat_col2 = st.columns([1, 3])
-            statistik_führen = stat_col1.checkbox(
-                "Statistik führen",
-                value=cfg.get("statistik_führen", False),
-                key=f"{prefix}_statistik",
-                help="Wenn aktiviert, wird die Zuteilung dieses Rapports über Wochen hinweg verfolgt und ausgeglichen.",
-            )
-            cfg["statistik_führen"] = statistik_führen
-
-            if statistik_führen:
-                st.caption("Gewichtung pro Person (Standard 1.0). Niedrigere Werte bedeuten seltenere Zuteilung im Verhältnis zu anderen.")
-                all_pool_names = sorted({
-                    n for pool in cfg.get("pools", [])
-                    for n in (pool.get("names") or [])
-                    if pool.get("type") == "names"
-                })
-                current_weights = cfg.get("stats_weight", {})
-                new_weights = {}
-                if all_pool_names:
-                    sw_cols = st.columns(min(len(all_pool_names), 4))
-                    for i, name in enumerate(all_pool_names):
-                        with sw_cols[i % 4]:
-                            new_weights[name] = st.number_input(
-                                name,
-                                min_value=0.1,
-                                max_value=10.0,
-                                value=float(current_weights.get(name, 1.0)),
-                                step=0.1,
-                                format="%.1f",
-                                key=f"{prefix}_sw_{name}",
-                            )
-                else:
-                    st.caption("Keine Personen in 'Namen'-Pools gefunden. Bitte zuerst Pools vom Typ 'Person' mit Namen befüllen.")
-                cfg["stats_weight"] = new_weights
-            else:
-                cfg.pop("stats_weight", None)
-
+        if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
+            pools.append({"type": "names", "names": [], "site": cfg.get("site", default_site)})
             cfg["pools"] = pools
-            pools_data[meeting_key] = cfg
+            save_meeting_pools(pools_data); st.rerun()
 
-    st.divider()
-    if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_bh_btn"):
-        validation_errors = []
-        for meeting_key, cfg in site_pools.items():
-            for i, pool in enumerate(cfg.get("pools", []), start=1):
-                if pool.get("type") == "names" and not pool.get("names"):
-                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Person' hat keine Namen ausgewählt.")
-                if pool.get("type") == "group" and not pool.get("group"):
-                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Gruppe' hat keine Gruppe ausgewählt.")
-        if validation_errors:
-            st.error("**Validierungsfehler:**")
-            for err in validation_errors: st.error(f"• {err}")
+        st.markdown("---")
+        st.markdown("**Fallback-Einstellungen**")
+        c1, c2 = st.columns(2)
+        cfg["fallback_text"] = c1.text_input("Fallback-Text",
+            value=cfg.get("fallback_text", "FÄLLT AUS"), key=f"{prefix}_fb_text")
+        cfg["roter_fallback_text"] = c2.checkbox("Roter Text",
+            value=cfg.get("roter_fallback_text", True), key=f"{prefix}_fb_rot")
+
+        st.markdown("---")
+        st.markdown("**Statistik-Einstellungen**")
+        stat_col1, _ = st.columns([1, 3])
+        statistik_führen = stat_col1.checkbox(
+            "Statistik führen",
+            value=cfg.get("statistik_führen", False),
+            key=f"{prefix}_statistik",
+            help="Wenn aktiviert, wird die Zuteilung dieses Rapports über Wochen hinweg verfolgt und ausgeglichen.",
+        )
+        cfg["statistik_führen"] = statistik_führen
+
+        if statistik_führen:
+            st.caption("Gewichtung pro Person (Standard 1.0). Niedrigere Werte bedeuten seltenere Zuteilung im Verhältnis zu anderen.")
+            _wt_name_set = set()
+            for pool in cfg.get("pools", []):
+                if pool.get("type") == "names":
+                    _wt_name_set.update(pool.get("names") or [])
+                elif pool.get("type") == "group" and pool.get("group"):
+                    try:
+                        _wt_name_set.update(
+                            sched._group_names(pool["group"], pool.get("site", cfg.get("site", "")))
+                        )
+                    except Exception:
+                        pass
+            all_pool_names = sorted(_wt_name_set)
+            current_weights = cfg.get("stats_weight", {})
+            new_weights = {}
+            if all_pool_names:
+                sw_cols = st.columns(min(len(all_pool_names), 4))
+                for wi, name in enumerate(all_pool_names):
+                    with sw_cols[wi % 4]:
+                        new_weights[name] = st.number_input(
+                            name, min_value=0.1, max_value=10.0,
+                            value=float(current_weights.get(name, 1.0)),
+                            step=0.1, format="%.1f",
+                            key=f"{prefix}_sw_{name}",
+                        )
+            else:
+                st.caption("Keine Personen in 'Namen'-Pools gefunden.")
+            cfg["stats_weight"] = new_weights
         else:
-            for meeting_key, cfg in pools_data.items():
+            cfg.pop("stats_weight", None)
+
+        cfg["pools"] = pools
+        pools_data[meeting_key] = cfg
+
+        st.markdown("---")
+        if st.button("Änderungen speichern", type="primary", key=f"{prefix}_save"):
+            validation_errors = []
+            for pool in cfg.get("pools", []):
+                if pool.get("type") == "names" and not pool.get("names"):
+                    validation_errors.append(f"Pool ohne Namen.")
+                if pool.get("type") == "group" and not pool.get("group"):
+                    validation_errors.append(f"Pool ohne Gruppe.")
+            if validation_errors:
+                for err in validation_errors: st.error(f"• {err}")
+            else:
                 for pool in cfg.get("pools", []):
                     for k in list(pool.keys()):
                         if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
                             if k not in ("type", "names", "group", "site", "exclude_hintergrund"):
                                 del pool[k]
-            save_meeting_pools(pools_data)
-            st.success("Rapporte-Pools gespeichert und neu geladen.")
-            st.rerun()
+                save_meeting_pools(pools_data)
+                st.success("Gespeichert.")
+                st.rerun()
 
+    # --- Outer BH / LI tabs ---
+    site_tab_bh, site_tab_li = st.tabs(["📊 Rapporte-Pools BH", "📊 Rapporte-Pools LI"])
 
-# ===========================================================================
-# TAB 6b — Rapporte-Pools LI
-# ===========================================================================
-
-elif page == "📊 Rapporte-Pools LI":
-    st.subheader("Rapporte-Pools — LI")
-    st.caption(
-        "Hier können die Prioritäts-Pools für LI-Rapporte bearbeitet werden. "
-        "Die Pools werden in der definierten Reihenfolge durchlaufen, bis eine "
-        "verfügbare Person gefunden wird."
-    )
-
-    pools_data = load_meeting_pools()
-    site_pools = {k: v for k, v in pools_data.items() if v.get("site") == "LI"}
-
-    for meeting_key, cfg in site_pools.items():
-        with st.expander(meeting_key):
-            prefix = meeting_key.replace("|", "_").replace(" ", "_").replace(":", "").replace("/", "_").replace("(", "").replace(")", "")
-            pools = cfg.get("pools", [])
-            all_staff_names = sorted(sched.staff_by_name.keys())
-
-            for i, pool in enumerate(pools):
-                st.markdown(f"<span style='font-size:1.05rem; font-weight:700; color:#4A90D9;'>Pool {i+1}</span>", unsafe_allow_html=True)
-                st.markdown("---")
-                pc1, pc2, pc3 = st.columns(3)
-                current_type = pool.get("type", "names")
-                type_display_idx = _POOL_TYPES.index(current_type) if current_type in _POOL_TYPES else 0
-                pool_type_display = pc1.selectbox("Typ", options=_POOL_TYPES_DISPLAY, index=type_display_idx, key=f"{prefix}_p{i}_type")
-                pool_type = _POOL_TYPES[_POOL_TYPES_DISPLAY.index(pool_type_display)]
-                pool["type"] = pool_type
-                pool_site = pc2.selectbox("Standort", options=_SITE_OPTIONS, index=_SITE_OPTIONS.index(pool.get("site", cfg.get("site", "LI"))), key=f"{prefix}_p{i}_site")
-                pool["site"] = pool_site
-                roter_text = pc3.checkbox("Roter Text", value=(pool.get("style") == "red_bold"), key=f"{prefix}_p{i}_rot")
-                pool["style"] = "red_bold" if roter_text else None
-                if pool_type == "names":
-                    current_names = pool.get("names") or []
-                    selected_names = st.multiselect("Namen", options=all_staff_names, default=[n for n in current_names if n in all_staff_names], key=f"{prefix}_p{i}_names")
-                    pool["names"] = selected_names if selected_names else []
-                if pool_type == "group":
-                    current_group = pool.get("group", "AA")
-                    group_display_idx = _GROUP_OPTIONS.index(current_group) if current_group in _GROUP_OPTIONS else 0
-                    pool_group_display = st.selectbox("Gruppe", options=_GROUP_DISPLAY, index=group_display_idx, key=f"{prefix}_p{i}_group")
-                    pool["group"] = _GROUP_OPTIONS[_GROUP_DISPLAY.index(pool_group_display)]
-                if pool_type == "hintergrund_vortag":
-                    st.caption("Person wird automatisch aus dem Hintergrund-Dienst des Vortags bestimmt.")
-                is_auto_type = pool_type in ("spaetdienst_aa", "hintergrund_vortag")
-                cb_col1, cb_col2 = st.columns(2)
-                excl_spaet = cb_col1.checkbox("Spätdienst ausschließen", value=bool(pool.get("exclude_spaetdienst")), key=f"{prefix}_p{i}_excl_spaet", disabled=is_auto_type)
-                pool["exclude_spaetdienst"] = pool_site if excl_spaet else None
-                excl_hintergrund = cb_col2.checkbox("Hintergrund ausschließen", value=bool(pool.get("exclude_hintergrund")), key=f"{prefix}_p{i}_excl_hintergr", disabled=is_auto_type)
-                pool["exclude_hintergrund"] = excl_hintergrund
-                current_excluded = pool.get("exclude_names") or []
-                excluded_names = st.multiselect("Ausgeschlossene Personen", options=all_staff_names, default=[n for n in current_excluded if n in all_staff_names], key=f"{prefix}_p{i}_excl_names")
-                pool["exclude_names"] = excluded_names if excluded_names else None
-                eid_str = st.text_input("Ausschluss pro Tag", value=_exclude_if_day_to_str(pool.get("exclude_if_day")), key=f"{prefix}_p{i}_eid", help="Format: 'Donnerstag: Name1, Name2; Freitag: Name3'")
-                pool["exclude_if_day"] = _str_to_exclude_if_day(eid_str)
-                if i == len(pools) - 1 and len(pools) > 1:
-                    if st.button("Pool entfernen", key=f"{prefix}_p{i}_remove"):
-                        pools.pop(i); cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
-
-            if st.button("Pool hinzufügen", key=f"{prefix}_add_pool"):
-                pools.append({"type": "names", "names": [], "site": cfg.get("site", "LI")})
-                cfg["pools"] = pools; save_meeting_pools(pools_data); st.rerun()
-
-            st.markdown("---")
-            st.markdown("**Fallback-Einstellungen**")
-            c1, c2 = st.columns(2)
-            cfg["fallback_text"] = c1.text_input("Fallback-Text", value=cfg.get("fallback_text", "FÄLLT AUS"), key=f"{prefix}_fb_text")
-            cfg["roter_fallback_text"] = c2.checkbox("Roter Text", value=cfg.get("roter_fallback_text", True), key=f"{prefix}_fb_rot")
-
-            st.markdown("---")
-            st.markdown("**Statistik-Einstellungen**")
-            stat_col1, stat_col2 = st.columns([1, 3])
-            statistik_führen = stat_col1.checkbox(
-                "Statistik führen",
-                value=cfg.get("statistik_führen", False),
-                key=f"{prefix}_statistik",
-                help="Wenn aktiviert, wird die Zuteilung dieses Rapports über Wochen hinweg verfolgt und ausgeglichen.",
-            )
-            cfg["statistik_führen"] = statistik_führen
-
-            if statistik_führen:
-                st.caption("Gewichtung pro Person (Standard 1.0). Niedrigere Werte bedeuten seltenere Zuteilung im Verhältnis zu anderen.")
-                all_pool_names = sorted({
-                    n for pool in cfg.get("pools", [])
-                    for n in (pool.get("names") or [])
-                    if pool.get("type") == "names"
-                })
-                current_weights = cfg.get("stats_weight", {})
-                new_weights = {}
-                if all_pool_names:
-                    sw_cols = st.columns(min(len(all_pool_names), 4))
-                    for i, name in enumerate(all_pool_names):
-                        with sw_cols[i % 4]:
-                            new_weights[name] = st.number_input(
-                                name,
-                                min_value=0.1,
-                                max_value=10.0,
-                                value=float(current_weights.get(name, 1.0)),
-                                step=0.1,
-                                format="%.1f",
-                                key=f"{prefix}_sw_{name}",
-                            )
-                else:
-                    st.caption("Keine Personen in 'Namen'-Pools gefunden. Bitte zuerst Pools vom Typ 'Person' mit Namen befüllen.")
-                cfg["stats_weight"] = new_weights
-            else:
-                cfg.pop("stats_weight", None)
-
-            cfg["pools"] = pools
-            pools_data[meeting_key] = cfg
-
-    st.divider()
-    if st.button("Alle Pool-Änderungen speichern", type="primary", key="save_pools_li_btn"):
-        validation_errors = []
-        for meeting_key, cfg in site_pools.items():
-            for i, pool in enumerate(cfg.get("pools", []), start=1):
-                if pool.get("type") == "names" and not pool.get("names"):
-                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Person' hat keine Namen ausgewählt.")
-                if pool.get("type") == "group" and not pool.get("group"):
-                    validation_errors.append(f"{meeting_key} - Pool {i}: Typ 'Gruppe' hat keine Gruppe ausgewählt.")
-        if validation_errors:
-            st.error("**Validierungsfehler:**")
-            for err in validation_errors: st.error(f"• {err}")
+    with site_tab_bh:
+        bh_pools = {k: v for k, v in pools_data.items() if v.get("site") == "BH"}
+        if bh_pools:
+            bh_tab_labels = [k.split("|", 1)[-1].strip() for k in bh_pools.keys()]
+            bh_tabs = st.tabs(bh_tab_labels)
+            for tab, (meeting_key, cfg) in zip(bh_tabs, bh_pools.items()):
+                with tab:
+                    _render_pool_editor(meeting_key, cfg, "BH")
         else:
-            for meeting_key, cfg in pools_data.items():
-                for pool in cfg.get("pools", []):
-                    for k in list(pool.keys()):
-                        if pool[k] is None or pool[k] == "" or pool[k] == [] or pool[k] is False:
-                            if k not in ("type", "names", "group", "site", "exclude_hintergrund"):
-                                del pool[k]
-            save_meeting_pools(pools_data)
-            st.success("Rapporte-Pools gespeichert und neu geladen.")
-            st.rerun()
+            st.caption("Keine BH-Rapporte vorhanden.")
+
+    with site_tab_li:
+        li_pools = {k: v for k, v in pools_data.items() if v.get("site") == "LI"}
+        if li_pools:
+            li_tab_labels = [k.split("|", 1)[-1].strip() for k in li_pools.keys()]
+            li_tabs = st.tabs(li_tab_labels)
+            for tab, (meeting_key, cfg) in zip(li_tabs, li_pools.items()):
+                with tab:
+                    _render_pool_editor(meeting_key, cfg, "LI")
+        else:
+            st.caption("Keine LI-Rapporte vorhanden.")
 
 
 # ===========================================================================
@@ -1945,36 +1887,60 @@ elif page == "📈 Rapport-Statistik":
 
     stats = _load_stats_ui()
 
-    for meeting_key, cfg in tracked.items():
-        st.markdown(f"### {meeting_key}")
+    # One tab per tracked rapport
+    tab_labels = list(tracked.keys())
+    rapport_tabs = st.tabs(tab_labels)
 
+    for tab, (meeting_key, cfg) in zip(rapport_tabs, tracked.items()):
+      with tab:
         rapport_stats = stats.get(meeting_key, {})
         stats_weight  = cfg.get("stats_weight", {})
 
-        # Collect all names from pools of type "names" — these are the tracked candidates
-        pool_names = sorted({
-            n for pool in cfg.get("pools", [])
-            for n in (pool.get("names") or [])
-            if pool.get("type") == "names"
-        })
+        # Collect all names from pools — expand both "names" and "group" types
+        _pool_name_set = set()
+        for pool in cfg.get("pools", []):
+            if pool.get("type") == "names":
+                _pool_name_set.update(pool.get("names") or [])
+            elif pool.get("type") == "group" and pool.get("group"):
+                try:
+                    _pool_name_set.update(
+                        sched._group_names(pool["group"], pool.get("site", cfg.get("site", "")))
+                    )
+                except Exception:
+                    pass
+        pool_names = sorted(
+            n for n in _pool_name_set
+            if rapport_stats.get(n, {}).get("count", 0) > 0
+        )
 
         if not pool_names:
-            st.caption("Keine Personen in 'Namen'-Pools.")
-            st.divider()
+            st.caption("Noch keine Einträge vorhanden.")
             continue
 
+        # Compute max ratio for parity calculation
+        def _ratio(name):
+            e = rapport_stats.get(name, {})
+            c = e.get("count", 0)
+            w = stats_weight.get(name, 1.0)
+            return c / w if w else 0.0
+
+        max_ratio = max((_ratio(n) for n in pool_names), default=0.0)
+
+        import math
         # Build summary table
         rows = []
         for name in pool_names:
-            entry   = rapport_stats.get(name, {"count": 0, "history": []})
-            count   = entry.get("count", 0)
-            weight  = stats_weight.get(name, 1.0)
-            ratio   = round(count / weight, 2) if weight else "—"
+            entry  = rapport_stats.get(name, {"count": 0, "history": []})
+            count  = entry.get("count", 0)
+            weight = stats_weight.get(name, 1.0)
+            ratio  = _ratio(name)
+            # Rapporte needed to reach parity with the most-assigned person
+            needed = max(0, math.ceil(max_ratio * weight - count))
             rows.append({
-                "Name":                       name,
-                "Gewichtung":                 weight,
-                "Anzahl":                     count,
-                "Tatsächliche Verteilung":    ratio,
+                "Name":                              name,
+                "Gewichtung":                        weight,
+                "Anzahl":                            count,
+                "Ausstehend bis Parität":            needed,
             })
 
         df_stats = pd.DataFrame(rows)
@@ -1996,7 +1962,7 @@ elif page == "📈 Rapport-Statistik":
             st.caption("Noch keine Einträge vorhanden.")
 
         # Manual correction expander
-        with st.expander(f"Einträge bearbeiten — {meeting_key}"):
+        with st.expander(f"Einträge bearbeiten"):
             edit_name = st.selectbox(
                 "Person auswählen",
                 options=pool_names,
