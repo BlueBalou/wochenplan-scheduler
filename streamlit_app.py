@@ -573,7 +573,10 @@ if page == "📋 Wochenplan (Standard)":
                 
                 # Stage 3: Meetings
                 sched.assign_meetings(ws, absences, rng, skip_stats=skip_stats_opt1)
-                
+
+                # Write stats history to Statistik sheet
+                sched.write_stats_to_sheet(wb)
+
                 # Save
                 wb.save(output_tmp_path)
                 wb.close()
@@ -747,7 +750,10 @@ elif page == "📄 Wochenplan (Eigene Vorlage)":
                 
                 # Stage 3: Meetings
                 sched.assign_meetings(ws, absences, rng, skip_stats=skip_stats_opt2)
-                
+
+                # Write stats history to Statistik sheet
+                sched.write_stats_to_sheet(wb)
+
                 # Save
                 wb.save(output_tmp_path)
                 wb.close()
@@ -1432,6 +1438,40 @@ elif page == "👨‍⚕️ Frontarzt":
         help="Wenn aktiviert: erste FR-Zelle LI nur mit LA besetzt."
     )
 
+    st.markdown("**Ausschluss Vormittag / Nachmittag**")
+    st.caption("Format: 'Vormittag: Name1, Name2; Nachmittag: Name3' — gilt für BH und LI.")
+
+    def _fr_slot_excl_to_str(vormittag: list, nachmittag: list) -> str:
+        parts = []
+        if vormittag:
+            parts.append("Vormittag: " + ", ".join(vormittag))
+        if nachmittag:
+            parts.append("Nachmittag: " + ", ".join(nachmittag))
+        return "; ".join(parts)
+
+    def _str_to_fr_slot_excl(s: str):
+        vormittag, nachmittag = [], []
+        for part in s.split(";"):
+            part = part.strip()
+            if part.lower().startswith("vormittag:"):
+                names = [n.strip() for n in part[len("vormittag:"):].split(",") if n.strip()]
+                vormittag.extend(names)
+            elif part.lower().startswith("nachmittag:"):
+                names = [n.strip() for n in part[len("nachmittag:"):].split(",") if n.strip()]
+                nachmittag.extend(names)
+        return vormittag, nachmittag
+
+    _bh_vorm = site_rules.get("BH", {}).get("fr_excluded_vormittag", [])
+    _bh_nach = site_rules.get("BH", {}).get("fr_excluded_nachmittag", [])
+    fr_slot_excl_str = st.text_input(
+        "Ausschluss Vormittag / Nachmittag",
+        value=_fr_slot_excl_to_str(_bh_vorm, _bh_nach),
+        key="fr_slot_excl",
+        help="Format: 'Vormittag: Name1, Name2; Nachmittag: Name3'",
+        label_visibility="collapsed",
+    )
+    _fr_excl_vorm, _fr_excl_nach = _str_to_fr_slot_excl(fr_slot_excl_str)
+
     st.divider()
 
     # ---- Ausgeschlossene Personen ----
@@ -1469,8 +1509,16 @@ elif page == "👨‍⚕️ Frontarzt":
     if st.button("Frontarzt-Einstellungen speichern", type="primary", key="save_fr_rules_btn"):
         # Save site rules into staff.json
         new_site_rules = {
-            "BH": {"no_oa_vormittag": bh_no_oa},
-            "LI": {"no_oa_vormittag": li_no_oa},
+            "BH": {
+                "no_oa_vormittag": bh_no_oa,
+                "fr_excluded_vormittag": _fr_excl_vorm,
+                "fr_excluded_nachmittag": _fr_excl_nach,
+            },
+            "LI": {
+                "no_oa_vormittag": li_no_oa,
+                "fr_excluded_vormittag": _fr_excl_vorm,
+                "fr_excluded_nachmittag": _fr_excl_nach,
+            },
         }
         sched.SITE_RULES.update(new_site_rules)
         # Read current staff.json and update site_rules

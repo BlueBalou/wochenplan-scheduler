@@ -384,6 +384,88 @@ def save_stats(data: dict) -> None:
     os.replace(tmp, STATS_JSON)
 
 
+def write_stats_to_sheet(wb) -> None:
+    """
+    Write stats.json data to the 'Statistik' sheet of the workbook.
+
+    Layout:
+      Col A: Year (written once per year, on the KW01 row)
+      Col B: KW number (integer)
+      Col C+: One column per tracked rapport (statistik_führen=true),
+              containing the assigned person's name or empty string.
+
+    Rows are ordered KW01–KW53 per year, from earliest to most recent year
+    found across all tracked rapporte in stats.json.
+    """
+    if "Statistik" not in wb.sheetnames:
+        return
+
+    ws = wb["Statistik"]
+
+    # Load data
+    stats = load_stats()
+    pools = MEETING_POOLS
+
+    # Collect tracked rapporte in the order they appear in MEETING_POOLS
+    tracked_keys = [k for k, v in pools.items() if v.get("statistik_führen")]
+    if not tracked_keys:
+        return
+
+    # Build a set of all (year, kw) tuples across all tracked rapporte
+    all_kws: set = set()
+    for key in tracked_keys:
+        for name_data in stats.get(key, {}).values():
+            for kw_str in name_data.get("history", []):
+                # Format: "2026-KW21"
+                try:
+                    year, kw = kw_str.split("-KW")
+                    all_kws.add((int(year), int(kw)))
+                except ValueError:
+                    pass
+
+    if not all_kws:
+        return
+
+    # Sort chronologically
+    sorted_kws = sorted(all_kws)
+
+    # Build lookup: {rapport_key: {kw_str: name}}
+    lookup: dict = {}
+    for key in tracked_keys:
+        lookup[key] = {}
+        for name, name_data in stats.get(key, {}).items():
+            for kw_str in name_data.get("history", []):
+                lookup[key][kw_str] = name
+
+    # Clear existing content
+    ws.delete_rows(1, ws.max_row)
+
+    # Write header row
+    header = ["Jahr", "KW"] + tracked_keys
+    for col, val in enumerate(header, start=1):
+        ws.cell(row=1, column=col, value=val)
+
+    # Write data rows
+    prev_year = None
+    for row_idx, (year, kw) in enumerate(sorted_kws, start=2):
+        kw_str = f"{year}-KW{kw:02d}"
+
+        # Year column — only write when year changes
+        if year != prev_year:
+            ws.cell(row=row_idx, column=1, value=year)
+            prev_year = year
+        else:
+            ws.cell(row=row_idx, column=1, value=None)
+
+        # KW column
+        ws.cell(row=row_idx, column=2, value=kw)
+
+        # Rapport columns
+        for col_idx, key in enumerate(tracked_keys, start=3):
+            name = lookup[key].get(kw_str, None)
+            ws.cell(row=row_idx, column=col_idx, value=name)
+
+
 def _stats_fair_pick(
     meeting_key: str,
     candidates: List[str],
@@ -675,50 +757,64 @@ def assign_fr_shifts_to_cells(
 
         # BH: Process all cells
         used = set()
-        bh_no_oa_vormittag = SITE_RULES.get("BH", {}).get("no_oa_vormittag", False)
+        bh_rules          = SITE_RULES.get("BH", {})
+        bh_no_oa_vormittag = bh_rules.get("no_oa_vormittag", False)
+        bh_excl_vorm      = set(bh_rules.get("fr_excluded_vormittag", []))
+        bh_excl_nach      = set(bh_rules.get("fr_excluded_nachmittag", []))
 
         if bh_no_oa_vormittag and FR_CELLS["BH"][day]:
-            # First cell: LA only
+            # First cell (Vormittag): LA only, minus Vormittag exclusions
             top_cell = FR_CELLS["BH"][day][0]
-            pick, _ = pick_fa_for_fr_shift(day, la_bh, abs_fr, used, rng, fr_og_excl)
+            pool_vorm = [n for n in la_bh if n not in bh_excl_vorm]
+            pick, _ = pick_fa_for_fr_shift(day, pool_vorm, abs_fr, used, rng, fr_og_excl)
             ws[top_cell].value = pick or ""
             if pick:
                 used.add(pick)
-            # Remaining cells: all FA
+            # Remaining cells (Nachmittag): all FA, minus Nachmittag exclusions
+            pool_nach = [n for n in fa_all_bh if n not in bh_excl_nach]
             for a1 in FR_CELLS["BH"][day][1:]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng, fr_og_excl)
+                pick, _ = pick_fa_for_fr_shift(day, pool_nach, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
         else:
-            # All cells: all FA
-            for a1 in FR_CELLS["BH"][day]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_bh, abs_fr, used, rng, fr_og_excl)
+            # All cells: all FA split by position
+            for idx, a1 in enumerate(FR_CELLS["BH"][day]):
+                excl = bh_excl_vorm if idx == 0 else bh_excl_nach
+                pool = [n for n in fa_all_bh if n not in excl]
+                pick, _ = pick_fa_for_fr_shift(day, pool, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
 
         # LI: Same logic
         used = set()
-        li_no_oa_vormittag = SITE_RULES.get("LI", {}).get("no_oa_vormittag", True)
+        li_rules          = SITE_RULES.get("LI", {})
+        li_no_oa_vormittag = li_rules.get("no_oa_vormittag", True)
+        li_excl_vorm      = set(li_rules.get("fr_excluded_vormittag", []))
+        li_excl_nach      = set(li_rules.get("fr_excluded_nachmittag", []))
 
         if li_no_oa_vormittag and FR_CELLS["LI"][day]:
-            # First cell: LA only
+            # First cell (Vormittag): LA only, minus Vormittag exclusions
             top_cell = FR_CELLS["LI"][day][0]
-            pick, _ = pick_fa_for_fr_shift(day, la_li, abs_fr, used, rng, fr_og_excl)
+            pool_vorm = [n for n in la_li if n not in li_excl_vorm]
+            pick, _ = pick_fa_for_fr_shift(day, pool_vorm, abs_fr, used, rng, fr_og_excl)
             ws[top_cell].value = pick or ""
             if pick:
                 used.add(pick)
-            # Remaining cells: all FA
+            # Remaining cells (Nachmittag): all FA, minus Nachmittag exclusions
+            pool_nach = [n for n in fa_all_li if n not in li_excl_nach]
             for a1 in FR_CELLS["LI"][day][1:]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng, fr_og_excl)
+                pick, _ = pick_fa_for_fr_shift(day, pool_nach, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
         else:
-            # All cells: all FA
-            for a1 in FR_CELLS["LI"][day]:
-                pick, _ = pick_fa_for_fr_shift(day, fa_all_li, abs_fr, used, rng, fr_og_excl)
+            # All cells: all FA split by position
+            for idx, a1 in enumerate(FR_CELLS["LI"][day]):
+                excl = li_excl_vorm if idx == 0 else li_excl_nach
+                pool = [n for n in fa_all_li if n not in excl]
+                pick, _ = pick_fa_for_fr_shift(day, pool, abs_fr, used, rng, fr_og_excl)
                 ws[a1].value = pick or ""
                 if pick:
                     used.add(pick)
@@ -886,10 +982,33 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                 chosen_og = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)[0]
 
             # 5. Choose person from compatible candidates.
-            # Priority: in_rotation > no_rotation > other_rotation.
-            # Within other_rotation: prefer candidate whose rotation OG is
-            # most filled (highest FA_COUNT) — least likely to need them there.
+            # Priority tiers: in_rotation > no_rotation > other_rotation.
+            # Within each tier, if the OG has warn_kein_fa_site flag and one
+            # site is already covered, prefer opposite-site candidates first
+            # (fall back to same-site only if no opposite-site available in tier).
+            # Within other_rotation: prefer candidate whose rotation OG is most filled.
             candidates = og_candidates[chosen_og]
+
+            # Site-balance helper: filters a tier to opposite-site candidates
+            # when the OG needs site balance, falls back to full tier if none available.
+            def _site_filtered(tier: list) -> list:
+                if not tier:
+                    return tier
+                if chosen_og not in TARGET_OG_FOR_KEIN_FA_SITE:
+                    return tier
+                # Find which sites are already assigned in this OG today
+                sites_present = {
+                    staff_by_name[n].site
+                    for n in staff_by_name
+                    if n != "" and _already_listed(ws, OG_CELLS[chosen_og][day], n)
+                }
+                if not sites_present:
+                    return tier  # No FA yet — no preference
+                if len(sites_present) >= 2:
+                    return tier  # Both sites already covered — no preference
+                covered_site = next(iter(sites_present))
+                opposite = [n for n in tier if staff_by_name[n].site != covered_site]
+                return opposite if opposite else tier
 
             in_rotation    = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
             no_rotation    = [n for n in candidates if not staff_by_name[n].rotations]
@@ -897,19 +1016,20 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                               if staff_by_name[n].rotations
                               and chosen_og not in staff_by_name[n].rotations]
 
-            if in_rotation:
-                pick = rng.choice(in_rotation)
-            elif no_rotation:
-                pick = rng.choice(no_rotation)
+            if _site_filtered(in_rotation):
+                pick = rng.choice(_site_filtered(in_rotation))
+            elif _site_filtered(no_rotation):
+                pick = rng.choice(_site_filtered(no_rotation))
             elif other_rotation:
-                # Tiebreak: prefer candidate whose rotation OG is most filled
+                # Apply site filter then tiebreak by most-filled rotation OG
+                filtered_other = _site_filtered(other_rotation)
                 def _other_rot_score_oa(name):
                     rot_ogs = [og for og in staff_by_name[name].rotations if og != chosen_og]
                     if not rot_ogs:
                         return 0
                     return max(FA_COUNTS[day].get(og, 0) for og in rot_ogs)
-                max_score = max(_other_rot_score_oa(n) for n in other_rotation)
-                best = [n for n in other_rotation if _other_rot_score_oa(n) == max_score]
+                max_score = max(_other_rot_score_oa(n) for n in filtered_other)
+                best = [n for n in filtered_other if _other_rot_score_oa(n) == max_score]
                 pick = rng.choice(best)
             else:
                 break  # Should not happen
