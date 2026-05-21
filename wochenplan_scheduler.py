@@ -872,46 +872,45 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             if not og_candidates:
                 break  # No compatible OG-person combinations
             
-            # 3. Prioritize OGs that have people with rotations waiting
-            # First, try to find OGs where someone has a rotation match
-            ogs_with_rotation_matches = []
-            for og, candidates in og_candidates.items():
-                if any(og in staff_by_name[n].rotations for n in candidates):
-                    ogs_with_rotation_matches.append(og)
-            
-            if ogs_with_rotation_matches:
-                # Choose among OGs with rotation matches, preferring lowest FA_COUNT
-                eligible_ogs = ogs_with_rotation_matches
-            else:
-                # No rotation matches available, use all OGs
-                eligible_ogs = list(og_candidates.keys())
-            
-            # 4. Choose OG with lowest FA_COUNT (among eligible)
+            # 3. Choose OG with lowest FA_COUNT among all eligible OGs.
+            # Rotation matches no longer filter OG selection — they only
+            # influence candidate selection within the chosen OG (step 4).
+            eligible_ogs = list(og_candidates.keys())
             minv = min(FA_COUNTS[day][og] for og in eligible_ogs)
             bucket = [og for og in eligible_ogs if FA_COUNTS[day][og] == minv]
-            
-            # 5. OG-Priority or Random
+
+            # 4. OG-Priority or Random tiebreak
             if USE_RANDOM_OG_SELECTION:
                 chosen_og = rng.choice(bucket)
             else:
                 chosen_og = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)[0]
-            
-            # 6. Choose person from compatible candidates
-            # Prioritize: in_rotation > no_rotation > other_rotation
+
+            # 5. Choose person from compatible candidates.
+            # Priority: in_rotation > no_rotation > other_rotation.
+            # Within other_rotation: prefer candidate whose rotation OG is
+            # most filled (highest FA_COUNT) — least likely to need them there.
             candidates = og_candidates[chosen_og]
-            
-            in_rotation = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
-            no_rotation = [n for n in candidates if not staff_by_name[n].rotations]
-            other_rotation = [n for n in candidates 
-                            if staff_by_name[n].rotations 
-                            and chosen_og not in staff_by_name[n].rotations]
-            
+
+            in_rotation    = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
+            no_rotation    = [n for n in candidates if not staff_by_name[n].rotations]
+            other_rotation = [n for n in candidates
+                              if staff_by_name[n].rotations
+                              and chosen_og not in staff_by_name[n].rotations]
+
             if in_rotation:
                 pick = rng.choice(in_rotation)
             elif no_rotation:
                 pick = rng.choice(no_rotation)
             elif other_rotation:
-                pick = rng.choice(other_rotation)
+                # Tiebreak: prefer candidate whose rotation OG is most filled
+                def _other_rot_score_oa(name):
+                    rot_ogs = [og for og in staff_by_name[name].rotations if og != chosen_og]
+                    if not rot_ogs:
+                        return 0
+                    return max(FA_COUNTS[day].get(og, 0) for og in rot_ogs)
+                max_score = max(_other_rot_score_oa(n) for n in other_rotation)
+                best = [n for n in other_rotation if _other_rot_score_oa(n) == max_score]
+                pick = rng.choice(best)
             else:
                 break  # Should not happen
             
@@ -966,39 +965,43 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             if not og_candidates:
                 break
             
-            # Prioritize OGs with rotation matches
-            ogs_with_rotation_matches = []
-            for og, candidates in og_candidates.items():
-                if any(og in staff_by_name[n].rotations for n in candidates):
-                    ogs_with_rotation_matches.append(og)
-            
-            if ogs_with_rotation_matches:
-                eligible_ogs = ogs_with_rotation_matches
-            else:
-                eligible_ogs = list(og_candidates.keys())
-            
+            # 3. Choose OG with lowest AA_COUNT among all eligible OGs.
+            eligible_ogs = list(og_candidates.keys())
             minv = min(AA_COUNTS[day][og] for og in eligible_ogs)
             bucket = [og for og in eligible_ogs if AA_COUNTS[day][og] == minv]
-            
+
+            # 4. OG-Priority or Random tiebreak
             if USE_RANDOM_OG_SELECTION:
                 chosen_og = rng.choice(bucket)
             else:
                 chosen_og = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)[0]
-            
+
+            # 5. Choose person from compatible candidates.
+            # Priority: in_rotation > no_rotation > other_rotation.
+            # Within other_rotation: prefer candidate whose rotation OG is
+            # most filled (highest AA_COUNT) — least likely to need them there.
             candidates = og_candidates[chosen_og]
-            
-            in_rotation = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
-            no_rotation = [n for n in candidates if not staff_by_name[n].rotations]
-            other_rotation = [n for n in candidates 
-                            if staff_by_name[n].rotations 
-                            and chosen_og not in staff_by_name[n].rotations]
-            
+
+            in_rotation    = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
+            no_rotation    = [n for n in candidates if not staff_by_name[n].rotations]
+            other_rotation = [n for n in candidates
+                              if staff_by_name[n].rotations
+                              and chosen_og not in staff_by_name[n].rotations]
+
             if in_rotation:
                 pick = rng.choice(in_rotation)
             elif no_rotation:
                 pick = rng.choice(no_rotation)
             elif other_rotation:
-                pick = rng.choice(other_rotation)
+                # Tiebreak: prefer candidate whose rotation OG is most filled
+                def _other_rot_score_aa(name):
+                    rot_ogs = [og for og in staff_by_name[name].rotations if og != chosen_og]
+                    if not rot_ogs:
+                        return 0
+                    return max(AA_COUNTS[day].get(og, 0) for og in rot_ogs)
+                max_score = max(_other_rot_score_aa(n) for n in other_rotation)
+                best = [n for n in other_rotation if _other_rot_score_aa(n) == max_score]
+                pick = rng.choice(best)
             else:
                 break
             
@@ -1597,34 +1600,39 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         elif "Nachtdienst" in dienst_type:
             nacht_by_day[day_name] = abbrev_name
 
+        # --- Class AA ---
+        # Spätdienst Mo-Fr: always goes to spaetdienst_cells (weekday cell).
+        # Pikett_Vormittag_Sa/So: always goes to vordergrund_by_day — the
+        # existing write logic handles both weekends (Vordergrund cell) and
+        # holidays on weekdays (merge cell via FEIERTAGE_MERGE_CELLS).
+        # Tagdienst Sa/So always appears paired with Pikett_Vormittag_Sa/So —
+        # skipped to avoid double-writes.
         elif "Spätdienst" in dienst_type:
             site = "BH" if dienst_type.startswith("Bh-") else "LI"
             spaet_by_day[site][day_name] = abbrev_name
 
-        # Vordergrunddienst - specific weekend dienste
         elif "Pikett_Vormittag_Sa/So" in dienst_type:
             vordergrund_by_day[day_name] = abbrev_name
 
         elif "Tagdienst Sa/So" in dienst_type:
-            vordergrund_by_day[day_name] = abbrev_name
+            pass  # Always paired with Pikett_Vormittag_Sa/So — handled above
 
-        # Hintergrunddienst Nacht Mo-Fr: stored under the weekday it occurs
-        elif "Pikett_Nacht_Mo-Fr" in dienst_type:
+        # --- Class FA: Hintergrund (weekdays, weekends, holidays) ---
+        # Both dienst types populate hintergrund_by_day (Excel cell).
+        # HINTERGRUND_BY_DAY is also updated for weekday entries (incl. holidays)
+        # so that hintergrund_vortag lookups work the next day.
+        # For Sa/So entries HINTERGRUND_BY_DAY is NOT updated here — Pass 1
+        # already set it from the prior weekend.
+        elif "Pikett_Nacht_Mo-Fr" in dienst_type or "Pikett_24h_Sa/So" in dienst_type:
             hintergrund_by_day[day_name] = abbrev_name
-            HINTERGRUND_BY_DAY[day_name] = abbrev_name
+            if date.dayofweek < 5:  # Mon–Fri: weekday or holiday
+                HINTERGRUND_BY_DAY[day_name] = abbrev_name
 
-        # Hintergrunddienst 24h Sa/So: write to Excel cell only.
-        # Do NOT update HINTERGRUND_BY_DAY here — Pass 1 already set it
-        # from the prior weekend. Overwriting it with the current week's
-        # Sat/Sun would corrupt Monday's exclusion lookup next week.
-        elif "Pikett_24h_Sa/So" in dienst_type:
-            hintergrund_by_day[day_name] = abbrev_name
-
-        # Other Pikett types (e.g. Pikett_Vormittag) — write to Excel only
+        # Other Pikett types — write to Hintergrund cell only
         elif "Pikett" in dienst_type:
             hintergrund_by_day[day_name] = abbrev_name
 
-        # Tagdienst (weekday and weekend) — normal working day, no special cell to write
+        # Tagdienst weekday — normal working day, no special cell
         elif "Tagdienst" in dienst_type:
             pass
     
