@@ -81,6 +81,11 @@ def _load_og_rules():
         if og not in OG_MAX_AAS:
             OG_MAX_AAS[og] = None  # No limit
     
+    global US_VERTRETUNG_POOLS, OG_VERTRETUNG_OGS, OG_VERTRETUNG_POOLS
+    US_VERTRETUNG_POOLS  = _r.get("us_vertretung_pools", {})
+    OG_VERTRETUNG_OGS    = _r.get("og_vertretung_ogs", [])
+    OG_VERTRETUNG_POOLS  = _r.get("og_vertretung_pools", {})
+
     return (
         set(_r.get("rotation_or_leader_only", [])),
         set(_r.get("warn_kein_aa", [])),
@@ -101,6 +106,14 @@ OG_MAX_FAS: Dict[str, Optional[int]] = {}
 OG_MAX_AAS: Dict[str, Optional[int]] = {}
 OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OG_EXCLUDE_FROM_RAPPORTE = _load_og_rules()
 OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
+
+# US Vertretung: per-OG priority list of FAs for site-coverage substitution
+# Key: OG name, Value: list of FA names in priority order
+US_VERTRETUNG_POOLS: Dict[str, List[str]] = {}
+
+# OG Vertretung: OGs that get a bracketed substitute when fully empty
+OG_VERTRETUNG_OGS: List[str] = []
+OG_VERTRETUNG_POOLS: Dict[str, List[str]] = {}
 
 
 def _load_fr_rules() -> tuple:
@@ -138,6 +151,7 @@ class Staff:
     site: str            # BH | LI
     leads_ogs: Set[str] = field(default_factory=set)        # for LA only
     rotations: Set[str] = field(default_factory=set)        # AA + FA(non-leader)
+    avoid_ogs: Set[str] = field(default_factory=set)        # soft-avoid: only assigned here as last resort
     fr_excluded: bool = False                               # if True → never Frontarzt on any day
     fr_excluded_days: Set[str] = field(default_factory=set) # excluded on specific weekdays only
     is_cover: bool = False                                  # if True → Stellvertreter (not shown in absence list)
@@ -163,17 +177,20 @@ staff_by_name: Dict[str, Staff] = {}
 def add_staff(name: str, role: str, site: str,
               leads_for: Optional[List[str]] = None,
               rotation: Optional[List[str]] = None,
+              avoid: Optional[List[str]] = None,
               fr_excluded: bool = False,
               fr_excluded_days: Optional[List[str]] = None,
               is_cover: bool = False):
     leads = set(leads_for or []) if role == LA else set()
     rots  = set(rotation or [])
+    avoids = set(avoid or [])
     staff_by_name[name] = Staff(
         name=name,
         role=role,
         site=site,
         leads_ogs=leads,
         rotations=rots,
+        avoid_ogs=avoids,
         fr_excluded=fr_excluded,
         fr_excluded_days=set(fr_excluded_days or []),
         is_cover=is_cover,
@@ -224,6 +241,7 @@ def load_staff_from_json(path: str) -> None:
             site=r["site"],
             leads_for=r.get("leads_ogs", []),
             rotation=r.get("rotations", []),
+            avoid=r.get("avoid_ogs", []),
             fr_excluded=r.get("fr_excluded", False),
             fr_excluded_days=r.get("fr_excluded_days", []),
             is_cover=r.get("is_cover", False),
@@ -344,11 +362,22 @@ load_layout_from_json(_layout_json)
 MEETING_POOLS: Dict[str, dict] = {}
 
 def load_meeting_pools_from_json(path: str) -> None:
-    """Load meeting pool definitions from JSON, replacing current MEETING_POOLS."""
+    """Load meeting pool definitions from JSON, replacing current MEETING_POOLS.
+    Keys beginning with '_' are not rapporte — they hold settings (e.g. '_settings')
+    and are read separately, not iterated as meetings."""
+    global STATS_RESPECT_INWEEK
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+    settings = data.get("_settings", {}) if isinstance(data.get("_settings"), dict) else {}
+    STATS_RESPECT_INWEEK = bool(settings.get("stats_respect_inweek", True))
     MEETING_POOLS.clear()
     MEETING_POOLS.update(data)
+
+# When True, _stats_fair_pick narrows by in-week load (day then week) before
+# applying the cross-week ratio, so a person already assigned other rapporte this
+# week is deprioritized. When False, it uses the cross-week ratio alone (legacy).
+# Set from meeting_pools.json "_settings".stats_respect_inweek (default True).
+STATS_RESPECT_INWEEK: bool = True
 
 _pools_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meeting_pools.json")
 if not os.path.exists(_pools_json):
@@ -364,6 +393,7 @@ def reload_og_rules() -> None:
     global OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OGS_SKIP_KEIN_AA, OG_EXCLUDE_FROM_RAPPORTE
     OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OG_EXCLUDE_FROM_RAPPORTE = _load_og_rules()
     OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
+    # US_VERTRETUNG_POOLS, OG_VERTRETUNG_OGS, OG_VERTRETUNG_POOLS are updated inside _load_og_rules
 
 
 # ---------------- Stats (cross-week fairness for tracked rapporte) ----------------
@@ -477,13 +507,21 @@ def _stats_fair_pick(
     """
     Cross-week fair pick for rapporte with statistik_führen=true.
 
-    Selection criterion: lowest (assignment_count / stats_weight) ratio.
-    stats_weight per person comes from meeting_pools.json (default 1.0).
-    Picks randomly among ties.
+    When STATS_RESPECT_INWEEK is True (default), candidates are narrowed by
+    in-week load first — fewest meetings TODAY (meetings_count_<day>), then
+    fewest meetings THIS WEEK (meetings_count_week) — and the cross-week
+    count/stats_weight ratio is applied only within that narrowed group. This
+    mirrors _fair_pick_pool and prevents someone already busy this week from
+    taking a tracked rapport while a less-loaded eligible person exists. If all
+    candidates are equally loaded in-week, the narrowing is a no-op and the pure
+    cross-week ratio decides — so the legacy outcome is preserved whenever there
+    is no in-week difference to act on.
 
-    Writes the assignment to stats.json immediately after picking and
-    increments the in-week meetings_count_* counters so subsequent
-    rapporte in the same week see this person as already assigned.
+    When STATS_RESPECT_INWEEK is False, only the cross-week ratio is used.
+
+    stats_weight per person comes from meeting_pools.json (default 1.0).
+    Picks randomly among ties, then writes the assignment to stats.json and
+    increments the in-week counters so later rapporte see this assignment.
     """
     if not candidates or not kw_str:
         return None
@@ -491,14 +529,25 @@ def _stats_fair_pick(
     stats = load_stats()
     rapport_stats = stats.setdefault(meeting_key, {})
 
-    # Compute ratio for each candidate
+    # Cross-week ratio: assignment_count / stats_weight (lower = assign sooner).
     def ratio(name: str) -> float:
         count = rapport_stats.get(name, {}).get("count", 0)
         weight = stats_weight.get(name, 1.0)
         return count / weight if weight else float("inf")
 
-    min_ratio = min(ratio(n) for n in candidates)
-    bucket = [n for n in candidates if ratio(n) == min_ratio]
+    pool = list(candidates)
+    if STATS_RESPECT_INWEEK:
+        # 1) fewest meetings today
+        day_counter_name = f"meetings_count_{day.lower()}"
+        min_today = min(getattr(staff_by_name[n], day_counter_name, 0) for n in pool)
+        pool = [n for n in pool if getattr(staff_by_name[n], day_counter_name, 0) == min_today]
+        # 2) fewest meetings this week
+        min_week = min(staff_by_name[n].meetings_count_week for n in pool)
+        pool = [n for n in pool if staff_by_name[n].meetings_count_week == min_week]
+
+    # 3) lowest cross-week ratio within the (possibly narrowed) pool
+    min_ratio = min(ratio(n) for n in pool)
+    bucket = [n for n in pool if ratio(n) == min_ratio]
     pick = rng.choice(bucket)
 
     # Write to stats.json immediately
@@ -844,6 +893,36 @@ def _already_listed(ws: Worksheet, cells: Tuple[str,...], name: str) -> bool:
         if isinstance(v,str) and v.strip()==name: return True
     return False
 
+def _cell_of_name(ws: Worksheet, cells: Tuple[str,...], name: str) -> Optional[str]:
+    """Return the A1 address of the cell holding exactly `name`, or None."""
+    for a1 in cells:
+        v = ws[a1].value
+        if isinstance(v,str) and v.strip()==name: return a1
+    return None
+
+def _remove_and_compact(ws: Worksheet, cells: Tuple[str,...], name: str) -> bool:
+    """Remove `name` from the OG cell range and pull all entries below it up by
+    one so no gap is left. Returns True if the name was found and removed.
+
+    Only the non-empty string entries are compacted; trailing cells are cleared.
+    Flag strings (KEIN FA …, WENIGER …) are normally written after all people,
+    so in practice this preserves their relative order too — but the swap runs
+    before flags (Round 3), so the range contains only names at this point.
+    """
+    values = [ws[a1].value for a1 in cells]
+    kept = []
+    found = False
+    for v in values:
+        if isinstance(v, str) and v.strip() == name:
+            found = True
+            continue
+        kept.append(v)
+    if not found:
+        return False
+    for i, a1 in enumerate(cells):
+        ws[a1].value = kept[i] if i < len(kept) else ""
+    return True
+
 def assign_la_to_ogs(ws: Worksheet, absences_by_day: Dict[str, Set[str]]) -> Dict[str, Dict[str, int]]:
     """
     Assign every present LA to all of their dedicated OGs (no prioritization).
@@ -939,8 +1018,14 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             # Cap (OG_MAX_FAS) is bypassed for an OG if at least one person in the
             # pool has a rotation in that specific OG — they are only blocked by the
             # cap, not by any other OG being understaffed.
+            # rotation_or_leader_only OGs (e.g. Mammo, Nuklearmedizin) are normally
+            # filled only by their LA leader (handled upstream). They become available
+            # in this fill round ONLY when someone in the pool has them as a rotation —
+            # and the candidate guard below ensures only rotation-holders are placed
+            # there, never a no-rotation/other-rotation spillover.
             available_ogs = [og for og in OG_LIST
-                           if og not in OG_ROTATION_OR_LEADER_ONLY
+                           if (og not in OG_ROTATION_OR_LEADER_ONLY
+                               or any(og in staff_by_name[n].rotations for n in pool))
                            and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
                            and (
                                OG_MAX_FAS.get(og) is None
@@ -961,7 +1046,9 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                 compatible = [n for n in pool
                             if staff_by_name[n].og_nonleader_count + og_weight <= 1.0
                             and not _already_listed(ws, OG_CELLS[og][day], n)
-                            and (not cap_reached or og in staff_by_name[n].rotations)]
+                            and (not cap_reached or og in staff_by_name[n].rotations)
+                            and (og not in OG_ROTATION_OR_LEADER_ONLY
+                                 or og in staff_by_name[n].rotations)]
                 if compatible:
                     og_candidates[og] = compatible
 
@@ -982,58 +1069,180 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                 chosen_og = sorted(bucket, key=lambda x: OG_PRIORITY_ORDER.index(x) if x in OG_PRIORITY_ORDER else 999)[0]
 
             # 5. Choose person from compatible candidates.
-            # Priority tiers: in_rotation > no_rotation > other_rotation.
-            # Within each tier, if the OG has warn_kein_fa_site flag and one
-            # site is already covered, prefer opposite-site candidates first
-            # (fall back to same-site only if no opposite-site available in tier).
-            # Within other_rotation: prefer candidate whose rotation OG is most filled.
+            #
+            # Base priority tiers: in_rotation > no_rotation > other_rotation >
+            # avoider. An avoider (chosen_og in their avoid_ogs) is only picked
+            # when every non-avoider tier is empty.
+            #
+            # For site-sensitive OGs (warn_kein_fa_site) where exactly ONE site
+            # is already covered, SITE COVERAGE DOMINATES the rotation tier:
+            # every opposite-site candidate (across all rotation tiers, in tier
+            # order) is preferred over any same-site candidate. This guarantees
+            # the missing site is filled even if the only same-site option has a
+            # rotation here. Rotation still orders candidates *within* a site
+            # group. When the OG is not site-sensitive, or both/neither sites are
+            # covered, opposite/same collapse and the base ordering applies.
             candidates = og_candidates[chosen_og]
 
-            # Site-balance helper: filters a tier to opposite-site candidates
-            # when the OG needs site balance, falls back to full tier if none available.
-            def _site_filtered(tier: list) -> list:
-                if not tier:
-                    return tier
-                if chosen_og not in TARGET_OG_FOR_KEIN_FA_SITE:
-                    return tier
-                # Find which sites are already assigned in this OG today
+            # Determine the missing site for this OG, if site-balance applies.
+            missing_site = None
+            if chosen_og in TARGET_OG_FOR_KEIN_FA_SITE:
                 sites_present = {
                     staff_by_name[n].site
                     for n in staff_by_name
-                    if n != "" and _already_listed(ws, OG_CELLS[chosen_og][day], n)
+                    if _already_listed(ws, OG_CELLS[chosen_og][day], n)
                 }
-                if not sites_present:
-                    return tier  # No FA yet — no preference
-                if len(sites_present) >= 2:
-                    return tier  # Both sites already covered — no preference
-                covered_site = next(iter(sites_present))
-                opposite = [n for n in tier if staff_by_name[n].site != covered_site]
-                return opposite if opposite else tier
+                if len(sites_present) == 1:
+                    covered_site = next(iter(sites_present))
+                    missing_site = LI if covered_site == BH else BH
 
-            in_rotation    = [n for n in candidates if chosen_og in staff_by_name[n].rotations]
-            no_rotation    = [n for n in candidates if not staff_by_name[n].rotations]
-            other_rotation = [n for n in candidates
-                              if staff_by_name[n].rotations
-                              and chosen_og not in staff_by_name[n].rotations]
+            # Partition: avoiders are pulled out into the lowest tier regardless
+            # of rotation or site (soft-avoid; rotation in an avoided OG is moot).
+            avoiders     = [n for n in candidates if chosen_og in staff_by_name[n].avoid_ogs]
+            non_avoiders = [n for n in candidates if chosen_og not in staff_by_name[n].avoid_ogs]
 
-            if _site_filtered(in_rotation):
-                pick = rng.choice(_site_filtered(in_rotation))
-            elif _site_filtered(no_rotation):
-                pick = rng.choice(_site_filtered(no_rotation))
-            elif other_rotation:
-                # Apply site filter then tiebreak by most-filled rotation OG
-                filtered_other = _site_filtered(other_rotation)
-                def _other_rot_score_oa(name):
-                    rot_ogs = [og for og in staff_by_name[name].rotations if og != chosen_og]
-                    if not rot_ogs:
-                        return 0
-                    return max(FA_COUNTS[day].get(og, 0) for og in rot_ogs)
-                max_score = max(_other_rot_score_oa(n) for n in filtered_other)
-                best = [n for n in filtered_other if _other_rot_score_oa(n) == max_score]
-                pick = rng.choice(best)
+            def _rot_tier(name: str) -> int:
+                """0=in_rotation, 1=no_rotation, 2=other_rotation."""
+                s = staff_by_name[name]
+                if chosen_og in s.rotations:
+                    return 0
+                if not s.rotations:
+                    return 1
+                return 2
+
+            def _other_rot_score_oa(name):
+                rot_ogs = [og for og in staff_by_name[name].rotations if og != chosen_og]
+                if not rot_ogs:
+                    return 0
+                return max(FA_COUNTS[day].get(og, 0) for og in rot_ogs)
+
+            def _pick_from_group(group: list):
+                """Pick one name from a same-site (or site-agnostic) group using
+                the base rotation tiers: in > no > other. Within other_rotation,
+                tiebreak by most-filled rotation OG. Returns None if empty."""
+                if not group:
+                    return None
+                t_in    = [n for n in group if _rot_tier(n) == 0]
+                t_no    = [n for n in group if _rot_tier(n) == 1]
+                t_other = [n for n in group if _rot_tier(n) == 2]
+                if t_in:
+                    return rng.choice(t_in)
+                if t_no:
+                    return rng.choice(t_no)
+                if t_other:
+                    max_score = max(_other_rot_score_oa(n) for n in t_other)
+                    best = [n for n in t_other if _other_rot_score_oa(n) == max_score]
+                    return rng.choice(best)
+                return None
+
+            pick = None
+            if missing_site is not None:
+                # Site coverage dominates: try opposite-site non-avoiders first,
+                # then same-site non-avoiders, then opposite-site avoiders, then
+                # same-site avoiders.
+                opp_non_av  = [n for n in non_avoiders if staff_by_name[n].site == missing_site]
+                same_non_av = [n for n in non_avoiders if staff_by_name[n].site != missing_site]
+                opp_av      = [n for n in avoiders if staff_by_name[n].site == missing_site]
+                same_av     = [n for n in avoiders if staff_by_name[n].site != missing_site]
+                for group in (opp_non_av, same_non_av, opp_av, same_av):
+                    pick = _pick_from_group(group)
+                    if pick is not None:
+                        break
             else:
+                # No site preference: base tiers, non-avoiders before avoiders.
+                pick = _pick_from_group(non_avoiders)
+                if pick is None:
+                    pick = _pick_from_group(avoiders)
+
+            if pick is None:
                 break  # Should not happen
-            
+
+            # 6. Site-balance SWAP (only for warn_kein_fa_site OGs).
+            # If the chosen OG needs the opposite site but no opposite-site
+            # candidate exists in the pool, the normal logic above falls back
+            # to a same-site pick — leaving the OG single-sided. Before
+            # accepting that, try to swap in an opposite-site OA who is already
+            # placed in another (non-site-sensitive) OG. If a swap succeeds we
+            # restart the loop; the same-site fallback `pick` is NOT placed and
+            # stays in the pool for a future iteration.
+            if chosen_og in TARGET_OG_FOR_KEIN_FA_SITE:
+                sites_present = {
+                    staff_by_name[n].site
+                    for n in staff_by_name
+                    if _already_listed(ws, OG_CELLS[chosen_og][day], n)
+                }
+                # Only act when exactly one site is covered AND the pick we are
+                # about to place is from that same (already-covered) site —
+                # i.e. the fallback genuinely left the OG single-sided.
+                if (len(sites_present) == 1
+                        and staff_by_name[pick].site in sites_present):
+                    covered_site = next(iter(sites_present))
+                    chosen_weight = OG_WEIGHTS_OA.get(chosen_og, 0.6)
+
+                    # Find opposite-site OAs already placed in another OG that
+                    # is itself NOT site-sensitive (so we don't rob a balance-
+                    # critical OG to fix this one), and who can absorb the
+                    # weight change after the swap.
+                    swap_options = []  # (name, source_og)
+                    for src_og in OG_LIST:
+                        if src_og == chosen_og:
+                            continue
+                        if src_og in TARGET_OG_FOR_KEIN_FA_SITE:
+                            continue
+                        src_weight = OG_WEIGHTS_OA.get(src_og, 0.6)
+                        for nm in _names_in_cells(ws, OG_CELLS[src_og][day]):
+                            s = staff_by_name.get(nm)
+                            if not s or not s.is_fa or s.role != OA:
+                                continue
+                            if s.site == covered_site:
+                                continue  # same site — no help
+                            if _already_listed(ws, OG_CELLS[chosen_og][day], nm):
+                                continue
+                            # Weight after swap: drop source OG weight, add chosen OG weight
+                            new_count = s.og_nonleader_count - src_weight + chosen_weight
+                            if new_count <= 1.0:
+                                swap_options.append((nm, src_og))
+
+                    if swap_options:
+                        # Prioritise swap candidate by the same tiers used for
+                        # normal selection, relative to the CHOSEN (target) OG.
+                        swap_in_rot = [(nm, so) for nm, so in swap_options
+                                       if chosen_og in staff_by_name[nm].rotations]
+                        swap_no_rot = [(nm, so) for nm, so in swap_options
+                                       if not staff_by_name[nm].rotations]
+                        swap_other  = [(nm, so) for nm, so in swap_options
+                                       if staff_by_name[nm].rotations
+                                       and chosen_og not in staff_by_name[nm].rotations]
+                        if swap_in_rot:
+                            swap_name, source_og = rng.choice(swap_in_rot)
+                        elif swap_no_rot:
+                            swap_name, source_og = rng.choice(swap_no_rot)
+                        elif swap_other:
+                            swap_name, source_og = rng.choice(swap_other)
+                        else:
+                            swap_name = source_og = None
+
+                        if swap_name:
+                            # Remove swap_name from its source OG, compacting the
+                            # range so no gap remains for entries below it.
+                            removed = _remove_and_compact(ws, OG_CELLS[source_og][day], swap_name)
+                            if removed:
+                                if staff_by_name[swap_name].role == OA:
+                                    FA_COUNTS[day][source_og] -= 1
+                                staff_by_name[swap_name].og_nonleader_count -= \
+                                    OG_WEIGHTS_OA.get(source_og, 0.6)
+                                # Place swap_name into the chosen (target) OG
+                                _place_in_og(ws, day, chosen_og, swap_name, count_for_fa=True)
+                                staff_by_name[swap_name].og_nonleader_count += chosen_weight
+                                # Re-evaluate pool membership for swap_name
+                                if staff_by_name[swap_name].og_nonleader_count + min_weight > 1.0:
+                                    pool.discard(swap_name)
+                                else:
+                                    pool.add(swap_name)
+                                # The same-site fallback `pick` is left unplaced
+                                # and remains in the pool for a future iteration.
+                                continue
+
             # 7. Place person in OG
             _place_in_og(ws, day, chosen_og, pick, count_for_fa=True)
             
@@ -1058,8 +1267,13 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             # Same logic as OAs, but using aa_og_count and checking max_aas.
             # Cap (OG_MAX_AAS) is bypassed for an OG if at least one person in the
             # pool has a rotation in that specific OG.
+            # rotation_or_leader_only OGs (e.g. Mammo, Nuklearmedizin) become
+            # available in this fill round ONLY when someone in the pool has them
+            # as a rotation; the candidate guard below ensures only rotation-holders
+            # are ever placed there (no no-rotation/other-rotation spillover).
             available_ogs = [og for og in OG_LIST
-                           if og not in OG_ROTATION_OR_LEADER_ONLY
+                           if (og not in OG_ROTATION_OR_LEADER_ONLY
+                               or any(og in staff_by_name[n].rotations for n in pool))
                            and _first_empty_cell(ws, OG_CELLS[og][day]) is not None
                            and (
                                OG_MAX_AAS.get(og) is None
@@ -1078,7 +1292,9 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                 compatible = [n for n in pool
                             if staff_by_name[n].aa_og_count + og_weight <= 1.0
                             and not _already_listed(ws, OG_CELLS[og][day], n)
-                            and (not cap_reached or og in staff_by_name[n].rotations)]
+                            and (not cap_reached or og in staff_by_name[n].rotations)
+                            and (og not in OG_ROTATION_OR_LEADER_ONLY
+                                 or og in staff_by_name[n].rotations)]
                 if compatible:
                     og_candidates[og] = compatible
             
@@ -1133,6 +1349,47 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             if staff_by_name[pick].aa_og_count + min_weight > 1.0:
                 pool.discard(pick)
         
+        # ===== ROUND 2.5: US Vertretung and OG Vertretung substitutions =====
+        abs_today = absences_by_day.get(day, set())
+
+        for og in OG_LIST:
+            cells = OG_CELLS[og][day]
+
+            # --- US Vertretung ---
+            # Fires when OG has warn_kein_fa_site flag and a site is missing.
+            # Finds first present FA from the missing site in the US priority list
+            # and writes "Name (US)" into the next empty cell.
+            if og in TARGET_OG_FOR_KEIN_FA_SITE:
+                for missing_site in (BH, LI):
+                    if not _has_fa_from_site(ws, cells, missing_site):
+                        priority_list = US_VERTRETUNG_POOLS.get(og, [])
+                        for candidate in priority_list:
+                            if (candidate not in abs_today
+                                    and candidate in staff_by_name
+                                    and staff_by_name[candidate].site == missing_site):
+                                slot = _first_empty_cell(ws, cells)
+                                if slot:
+                                    ws[slot].value = f"{candidate} (US)"
+                                break  # One US per missing site
+
+            # --- OG Vertretung ---
+            # Fires when OG is in og_vertretung_ogs and has no FA or AA assigned at all.
+            if og in OG_VERTRETUNG_OGS:
+                # Check if OG is completely empty (no FA, no AA)
+                has_any = any(
+                    ws[c].value and str(ws[c].value).strip()
+                    for c in cells
+                    if c and ws[c].value
+                )
+                if not has_any:
+                    priority_list = OG_VERTRETUNG_POOLS.get(og, [])
+                    for candidate in priority_list:
+                        if candidate not in abs_today and candidate in staff_by_name:
+                            slot = _first_empty_cell(ws, cells)
+                            if slot:
+                                ws[slot].value = f"({candidate})"
+                            break  # One vertretung per OG
+
         # ===== ROUND 3: Coverage flags =====
         for og in OG_LIST:
             cells = OG_CELLS[og][day]
@@ -1412,8 +1669,11 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
                 if isinstance(v, str) and v.strip():
                     rapporte_excluded_by_day[day].add(v.strip())
 
-    # Iterate over all meetings defined in meeting_pools.json
+    # Iterate over all meetings defined in meeting_pools.json, in file order.
+    # Keys beginning with '_' are settings, not rapporte — skip them.
     for meeting_key, cfg in MEETING_POOLS.items():
+        if meeting_key.startswith("_"):
+            continue
         site = cfg["site"]
         # Derive the meeting name from the key (format: "SITE|Meeting Name")
         mtg_name = meeting_key.split("|", 1)[1]
@@ -1675,7 +1935,7 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     prior_weekend = df[df['Datum'] < monday_date]
     for _, row in prior_weekend.iterrows():
         dienst_type = row['Bezeichnung'].strip() if isinstance(row['Bezeichnung'], str) else row['Bezeichnung']
-        if dienst_type in SKIP_TYPES:
+        if any(tok in dienst_type for tok in SKIP_TYPES):
             continue
         csv_name = row['Suchname']
         matched_name = match_csv_name_to_staff(csv_name)
@@ -1710,11 +1970,16 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
             continue
         abbrev_name = matched_name
 
-        # Categorize dienst
-        if dienst_type in SKIP_TYPES:
+        # Categorize dienst.
+        # All categories now match by substring (token contained anywhere in the
+        # Bezeichnung), consistent with the Nachtdienst/Spätdienst/Pikett branches
+        # below. Catalog tokens (skip, absenz) must be long, distinctive strings —
+        # short tokens could collide across categories. .strip() above still guards
+        # against manual leading/trailing whitespace in the CSV.
+        if any(tok in dienst_type for tok in SKIP_TYPES):
             continue  # EIR, PEPVIRTUELL etc. — ignore entirely
 
-        elif dienst_type in ABSENZ_TYPES:
+        elif any(tok in dienst_type for tok in ABSENZ_TYPES):
             absences_by_day[day_name].append(abbrev_name)
 
         elif "Nachtdienst" in dienst_type:

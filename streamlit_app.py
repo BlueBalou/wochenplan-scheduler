@@ -86,6 +86,7 @@ def save_staff_to_json() -> None:
             "site": s.site,
             "leads_ogs": sorted(s.leads_ogs),
             "rotations": sorted(s.rotations),
+            "avoid_ogs": sorted(s.avoid_ogs),
             "fr_excluded": s.fr_excluded,
             "fr_excluded_days": sorted(s.fr_excluded_days),
             "is_cover": s.is_cover,
@@ -125,6 +126,7 @@ def staff_to_display_dataframe() -> pd.DataFrame:
             "Standort": s.site,
             "Organgruppenleitung": ", ".join(sorted(s.leads_ogs)) or "—",
             "Rotationen": ", ".join(sorted(s.rotations)) or "—",
+            "Vermeiden": ", ".join(sorted(s.avoid_ogs)) or "—",
             "Kein Frontarzt": fr_info,
             "Stellvertreter": "Ja" if s.is_cover else "—",
         })
@@ -145,6 +147,8 @@ def _rapport_overview_df() -> pd.DataFrame:
     pools_data = load_meeting_pools()
     rows = []
     for key in pools_data:
+        if key.startswith("_"):
+            continue  # settings key, not a rapport
         parts = key.split("|", 1)
         site = parts[0] if len(parts) == 2 else "?"
         name = parts[1] if len(parts) == 2 else key
@@ -376,7 +380,9 @@ _KNOWN_BEZEICHNUNGEN = _load_known_bezeichnungen()
 
 
 def _check_unknown_bezeichnungen(csv_path: str) -> list[str]:
-    """Scan CSV for Bezeichnungen not in the known list. Returns list of unknown strings."""
+    """Scan CSV for Bezeichnungen not recognized by the catalog. A Bezeichnung is
+    recognized if any catalog token appears as a substring of it — identical to
+    the scheduler's substring matching. Returns list of unrecognized strings."""
     import csv as _csv
     unknown = []
     for encoding in ("utf-8", "iso-8859-1"):
@@ -385,7 +391,10 @@ def _check_unknown_bezeichnungen(csv_path: str) -> list[str]:
                 reader = _csv.DictReader(f, delimiter=";")
                 for row in reader:
                     b = row.get("Bezeichnung", "").strip()
-                    if b and b not in _KNOWN_BEZEICHNUNGEN and b not in unknown:
+                    if not b or b in unknown:
+                        continue
+                    recognized = any(tok in b for tok in _KNOWN_BEZEICHNUNGEN)
+                    if not recognized:
                         unknown.append(b)
             break
         except (UnicodeDecodeError, KeyError):
@@ -416,6 +425,14 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
             "Rotationen",
             options=sched.OG_LIST,
             default=sorted(d.get("rotations", [])),
+        )
+
+        avoid = st.multiselect(
+            "Organgruppe vermeiden",
+            options=sched.OG_LIST,
+            default=sorted(d.get("avoid_ogs", [])),
+            help="Diese Person wird diesen Organgruppen nur als letzte Möglichkeit zugeteilt "
+                 "(wenn niemand sonst verfügbar ist). Nur für OA wirksam.",
         )
 
         st.markdown("**Kein Frontarzt**")
@@ -452,6 +469,7 @@ def _staff_form(form_key: str, defaults: dict | None = None) -> dict | None:
                 "site": site,
                 "leads_ogs": leads if role == "LA" else [],
                 "rotations": rots,
+                "avoid_ogs": avoid,
                 "fr_excluded": fr_always,
                 "fr_excluded_days": [] if fr_always else fr_days,
                 "is_cover": is_cover,
@@ -848,6 +866,7 @@ elif page == "👥 Personalverwaltung":
             "site": s.site,
             "leads_ogs": sorted(s.leads_ogs),
             "rotations": sorted(s.rotations),
+            "avoid_ogs": sorted(s.avoid_ogs),
             "fr_excluded": s.fr_excluded,
             "fr_excluded_days": sorted(s.fr_excluded_days),
             "is_cover": s.is_cover,
@@ -860,6 +879,7 @@ elif page == "👥 Personalverwaltung":
                 site=result["site"],
                 leads_for=result["leads_ogs"],
                 rotation=result["rotations"],
+                avoid=result["avoid_ogs"],
                 fr_excluded=result["fr_excluded"],
                 fr_excluded_days=result["fr_excluded_days"],
                 is_cover=result["is_cover"],
@@ -881,6 +901,8 @@ elif page == "👥 Personalverwaltung":
             all_current_names = set(sched.staff_by_name.keys())
             
             for meeting_key, cfg in pools_data.items():
+                if meeting_key.startswith("_"):
+                    continue
                 for pool in cfg.get("pools", []):
                     # Clean names list
                     if "names" in pool and pool["names"]:
@@ -935,6 +957,7 @@ elif page == "👥 Personalverwaltung":
                     site=result["site"],
                     leads_for=result["leads_ogs"],
                     rotation=result["rotations"],
+                    avoid=result["avoid_ogs"],
                     fr_excluded=result["fr_excluded"],
                     fr_excluded_days=result["fr_excluded_days"],
                     is_cover=result["is_cover"],
@@ -947,11 +970,60 @@ elif page == "👥 Personalverwaltung":
 
 elif page == "📊 Rapporte verwalten":
     st.subheader("Rapporte verwalten")
-    st.caption("Rapporte hinzufügen, umbenennen oder löschen. Zellen werden im Layout-Editor bearbeitet.")
+    st.caption("Rapporte hinzufügen, umbenennen, löschen oder neu anordnen. Zellen werden im Layout-Editor bearbeitet. "
+               "**Die Reihenfolge bestimmt die Zuteilungsreihenfolge:** Rapporte werden von oben nach unten zugeteilt. "
+               "Rapporte mit Statistik sollten in der Regel vor den übrigen stehen, damit ihre Zuteilung in die "
+               "Wochenauslastung der späteren Rapporte einfließt.")
 
-    # Overview table
+    pools_data = load_meeting_pools()
+
+    # ---- Global statistics setting ----
+    _settings = pools_data.get("_settings", {}) if isinstance(pools_data.get("_settings"), dict) else {}
+    respect_inweek = st.checkbox(
+        "Statistik-Rapporte berücksichtigen die Wochenauslastung",
+        value=bool(_settings.get("stats_respect_inweek", True)),
+        key="stats_respect_inweek_cb",
+        help="Wenn aktiviert, werden Personen, die in dieser Woche bereits andere Rapporte haben, bei "
+             "Statistik-Rapporten zurückgestellt (zuerst Tages-, dann Wochenauslastung, dann wochenübergreifende "
+             "Statistik). Wenn deaktiviert, zählt nur die wochenübergreifende Statistik.",
+    )
+    if bool(_settings.get("stats_respect_inweek", True)) != respect_inweek:
+        _settings["stats_respect_inweek"] = respect_inweek
+        pools_data["_settings"] = _settings
+        save_meeting_pools(pools_data)
+        st.rerun()
+
+    st.divider()
+
+    # ---- Reorderable overview ----
+    st.markdown("**Reihenfolge der Rapporte** (↑/↓ zum Verschieben)")
+    ordered_keys = [k for k in pools_data if not k.startswith("_")]
+    for pos, key in enumerate(ordered_keys):
+        parts = key.split("|", 1)
+        site = parts[0] if len(parts) == 2 else "?"
+        name = parts[1] if len(parts) == 2 else key
+        stat_mark = " 📊" if pools_data[key].get("statistik_führen") else ""
+        num_col, name_col, up_col, down_col = st.columns([1, 8, 1, 1])
+        num_col.markdown(f"**{pos+1}**")
+        name_col.markdown(f"`{site}` {name}{stat_mark}")
+        if pos > 0:
+            if up_col.button("↑", key=f"rap_up_{pos}"):
+                kk = list(pools_data.keys())
+                i = kk.index(key)
+                kk[i], kk[i-1] = kk[i-1], kk[i]
+                pools_data = {k: pools_data[k] for k in kk}
+                save_meeting_pools(pools_data); st.rerun()
+        if pos < len(ordered_keys) - 1:
+            if down_col.button("↓", key=f"rap_down_{pos}"):
+                kk = list(pools_data.keys())
+                i = kk.index(key)
+                kk[i], kk[i+1] = kk[i+1], kk[i]
+                pools_data = {k: pools_data[k] for k in kk}
+                save_meeting_pools(pools_data); st.rerun()
+
+    st.divider()
+
     rapport_df = _rapport_overview_df()
-    st.dataframe(rapport_df[["Name", "Standort"]], use_container_width=True, hide_index=True)
 
     st.divider()
 
@@ -1594,12 +1666,14 @@ elif page == "🏥 Organgruppen Verwalten":
                             og_rules[key].remove(og)
                     save_og_rules(og_rules)
                     
-                    # Remove from staff.json (rotations and leads_ogs)
+                    # Remove from staff.json (rotations, leads_ogs, avoid_ogs)
                     for staff in sched.staff_by_name.values():
                         if og in staff.rotations:
                             staff.rotations.remove(og)
                         if og in staff.leads_ogs:
                             staff.leads_ogs.remove(og)
+                        if og in staff.avoid_ogs:
+                            staff.avoid_ogs.remove(og)
                     save_staff_to_json()
                     
                     # Reload
@@ -1881,13 +1955,49 @@ elif page == "🏥 Organgruppen Regeln":
             key="exclude_rapporte_select",
             label_visibility="collapsed"
         )
-    
+
+        st.markdown("**US-Vertretung Pools**")
+        st.caption("Für OGs mit 'KEIN FA IN SITE' Warnung: Prioritätsliste der FAs für US-Vertretung (kommagetrennt). Nur FAs vom fehlenden Standort werden berücksichtigt.")
+        us_vertretung_pools = dict(og_rules.get("us_vertretung_pools", {}))
+        for og in warn_site:
+            current_list = ", ".join(us_vertretung_pools.get(og, []))
+            new_str = st.text_input(
+                f"US-Vertretung Pool: {og}",
+                value=current_list,
+                key=f"us_pool_{og}",
+                help="Format: 'Name1, Name2, Name3' — in Prioritätsreihenfolge"
+            )
+            us_vertretung_pools[og] = [n.strip() for n in new_str.split(",") if n.strip()]
+
+        st.markdown("**Organgruppen Vertretung**")
+        st.caption("OGs die eine Vertretung '(Name)' erhalten wenn komplett leer")
+        og_vertretung_ogs = st.multiselect(
+            "Organgruppen",
+            options=sched.OG_LIST,
+            default=sorted(og_rules.get("og_vertretung_ogs", [])),
+            key="og_vertretung_ogs_select",
+            label_visibility="collapsed"
+        )
+        og_vertretung_pools = dict(og_rules.get("og_vertretung_pools", {}))
+        for og in og_vertretung_ogs:
+            current_list = ", ".join(og_vertretung_pools.get(og, []))
+            new_str = st.text_input(
+                f"Vertretung Pool: {og}",
+                value=current_list,
+                key=f"og_vert_pool_{og}",
+                help="Format: 'Name1, Name2, Name3' — in Prioritätsreihenfolge"
+            )
+            og_vertretung_pools[og] = [n.strip() for n in new_str.split(",") if n.strip()]
+
     if st.button("Sonderregeln speichern", type="primary", key="save_og_rules"):
         og_rules["rotation_or_leader_only"] = rotation_only
         og_rules["warn_kein_aa"] = warn_aa
         og_rules["warn_weniger_als_2fa"] = warn_2fa
         og_rules["warn_kein_fa_site"] = warn_site
         og_rules["exclude_from_rapporte"] = exclude_rapporte
+        og_rules["us_vertretung_pools"] = us_vertretung_pools
+        og_rules["og_vertretung_ogs"] = og_vertretung_ogs
+        og_rules["og_vertretung_pools"] = og_vertretung_pools
         save_og_rules(og_rules)
         st.success("Organgruppen-Sonderregeln gespeichert!")
         st.rerun()
