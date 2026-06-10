@@ -60,8 +60,13 @@ def _load_og_rules():
         OG_LIST = OG_LIST_NO_LAUFEN
     
     global OG_PRIORITY_ORDER, USE_RANDOM_OG_SELECTION, OG_WEIGHTS_OA, OG_WEIGHTS_AA, OG_MAX_FAS, OG_MAX_AAS
+    global SITE_COVERAGE_OVER_AVOID
     OG_PRIORITY_ORDER = _r.get("og_priority_order", OG_LIST_NO_LAUFEN)
     USE_RANDOM_OG_SELECTION = _r.get("use_random_og_selection", False)
+    # When True, for OGs requiring both-site coverage a candidate from the missing
+    # site is preferred over any same-site candidate even if they avoid the OG.
+    # When False, the avoid/rotation preference outranks site coverage (legacy).
+    SITE_COVERAGE_OVER_AVOID = _r.get("site_coverage_over_avoid", True)
     
     # Load separate OA and AA weights
     OG_WEIGHTS_OA = _r.get("og_weights_oa", _r.get("og_weights", {}))  # Fallback to old og_weights if needed
@@ -100,6 +105,7 @@ OG_LIST: List[str] = []
 
 OG_PRIORITY_ORDER: List[str] = []
 USE_RANDOM_OG_SELECTION: bool = False
+SITE_COVERAGE_OVER_AVOID: bool = True
 OG_WEIGHTS_OA: Dict[str, float] = {}
 OG_WEIGHTS_AA: Dict[str, float] = {}
 OG_MAX_FAS: Dict[str, Optional[int]] = {}
@@ -1074,14 +1080,15 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             # avoider. An avoider (chosen_og in their avoid_ogs) is only picked
             # when every non-avoider tier is empty.
             #
-            # For site-sensitive OGs (warn_kein_fa_site) where exactly ONE site
-            # is already covered, SITE COVERAGE DOMINATES the rotation tier:
-            # every opposite-site candidate (across all rotation tiers, in tier
-            # order) is preferred over any same-site candidate. This guarantees
-            # the missing site is filled even if the only same-site option has a
-            # rotation here. Rotation still orders candidates *within* a site
-            # group. When the OG is not site-sensitive, or both/neither sites are
-            # covered, opposite/same collapse and the base ordering applies.
+            # For both-site-coverage OGs (warn_kein_fa_site) where exactly ONE
+            # site is already covered, the relative precedence of "missing site"
+            # vs "avoid flag" is controlled by SITE_COVERAGE_OVER_AVOID (see the
+            # _group_order selection below). In both modes, rotation still orders
+            # candidates *within* a site/avoider group via _pick_from_group.
+            # When the OG does not require both-site coverage, or both/neither
+            # sites are covered, opposite/same collapse and the base ordering
+            # (in_rotation > no_rotation > other_rotation, non-avoider before
+            # avoider) applies.
             candidates = og_candidates[chosen_og]
 
             # Determine the missing site for this OG, if site-balance applies.
@@ -1144,7 +1151,18 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                 same_non_av = [n for n in non_avoiders if staff_by_name[n].site != missing_site]
                 opp_av      = [n for n in avoiders if staff_by_name[n].site == missing_site]
                 same_av     = [n for n in avoiders if staff_by_name[n].site != missing_site]
-                for group in (opp_non_av, same_non_av, opp_av, same_av):
+                # Group precedence depends on SITE_COVERAGE_OVER_AVOID:
+                #  True  -> site coverage dominates the avoid flag:
+                #           opp_non_av -> opp_av -> same_non_av -> same_av
+                #  False -> avoid/rotation dominates site coverage (legacy):
+                #           opp_non_av -> same_non_av -> opp_av -> same_av
+                # Rotation sub-tiers inside each group are applied identically in
+                # both modes by _pick_from_group.
+                if SITE_COVERAGE_OVER_AVOID:
+                    _group_order = (opp_non_av, opp_av, same_non_av, same_av)
+                else:
+                    _group_order = (opp_non_av, same_non_av, opp_av, same_av)
+                for group in _group_order:
                     pick = _pick_from_group(group)
                     if pick is not None:
                         break

@@ -1901,7 +1901,25 @@ elif page == "🏥 Organgruppen Regeln":
     # Section 2: Special Rules (moved from Layout Editor)
     st.markdown("### Organgruppen-Sonderregeln")
     st.caption("Regeln für automatische Warnungen und spezielle Zuweisungen")
-    
+
+    site_cov_mode = st.radio(
+        "Priorisierung bei OGs mit Pflicht-Abdeckung beider Standorte",
+        options=[
+            "Standortabdeckung vor Avoid/Rotation",
+            "Avoid/Rotation vor Standortabdeckung",
+        ],
+        index=0 if og_rules.get("site_coverage_over_avoid", True) else 1,
+        key="site_coverage_mode",
+        help=(
+            "Gilt nur für OGs mit Pflicht-Abdeckung beider Standorte, wenn nur ein "
+            "Standort besetzt ist. 'Standortabdeckung vor Avoid/Rotation': eine Person "
+            "vom fehlenden Standort wird auch dann gewählt, wenn sie diese OG meidet. "
+            "'Avoid/Rotation vor Standortabdeckung': die Meiden-/Rotations-Präferenz hat "
+            "Vorrang (bisheriges Verhalten). Die Rotations-Reihenfolge innerhalb einer "
+            "Gruppe bleibt in beiden Fällen gleich."
+        ),
+    )
+
     col1, col2 = st.columns(2)
     
     with col1:
@@ -1936,8 +1954,8 @@ elif page == "🏥 Organgruppen Regeln":
             label_visibility="collapsed"
         )
         
-        st.markdown("**KEIN FA IN SITE Warnung**")
-        st.caption("OGs die 'KEIN FA IN BH/LI' anzeigen wenn keine FAs vom jeweiligen Standort")
+        st.markdown("**OGs mit Pflicht-Abdeckung beider Standorte**")
+        st.caption("Für diese OGs versucht die Zuteilung, an beiden Standorten (BH und LI) einen FA zu platzieren. Gelingt dies nicht, wird 'KEIN FA IN BH/LI' als Warnung eingetragen.")
         warn_site = st.multiselect(
             "Organgruppen",
             options=sched.OG_LIST,
@@ -1998,6 +2016,9 @@ elif page == "🏥 Organgruppen Regeln":
         og_rules["us_vertretung_pools"] = us_vertretung_pools
         og_rules["og_vertretung_ogs"] = og_vertretung_ogs
         og_rules["og_vertretung_pools"] = og_vertretung_pools
+        og_rules["site_coverage_over_avoid"] = (
+            site_cov_mode == "Standortabdeckung vor Avoid/Rotation"
+        )
         save_og_rules(og_rules)
         st.success("Organgruppen-Sonderregeln gespeichert!")
         st.rerun()
