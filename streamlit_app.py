@@ -1661,7 +1661,7 @@ elif page == "🏥 Organgruppen Verwalten":
                     for key in ["og_weights_oa", "og_weights_aa", "og_max_fas", "og_max_aas"]:
                         if og in og_rules.get(key, {}):
                             del og_rules[key][og]
-                    for key in ["rotation_or_leader_only", "warn_kein_aa", "warn_weniger_als_2fa", "warn_kein_fa_site"]:
+                    for key in ["rotation_or_leader_only", "warn_kein_aa", "warn_weniger_als_2fa", "warn_kein_fa_site", "rotation_first_aa_ogs"]:
                         if og in og_rules.get(key, []):
                             og_rules[key].remove(og)
                     save_og_rules(og_rules)
@@ -1902,24 +1902,6 @@ elif page == "🏥 Organgruppen Regeln":
     st.markdown("### Organgruppen-Sonderregeln")
     st.caption("Regeln für automatische Warnungen und spezielle Zuweisungen")
 
-    site_cov_mode = st.radio(
-        "Priorisierung bei OGs mit Pflicht-Abdeckung beider Standorte",
-        options=[
-            "Standortabdeckung vor Avoid/Rotation",
-            "Avoid/Rotation vor Standortabdeckung",
-        ],
-        index=0 if og_rules.get("site_coverage_over_avoid", True) else 1,
-        key="site_coverage_mode",
-        help=(
-            "Gilt nur für OGs mit Pflicht-Abdeckung beider Standorte, wenn nur ein "
-            "Standort besetzt ist. 'Standortabdeckung vor Avoid/Rotation': eine Person "
-            "vom fehlenden Standort wird auch dann gewählt, wenn sie diese OG meidet. "
-            "'Avoid/Rotation vor Standortabdeckung': die Meiden-/Rotations-Präferenz hat "
-            "Vorrang (bisheriges Verhalten). Die Rotations-Reihenfolge innerhalb einer "
-            "Gruppe bleibt in beiden Fällen gleich."
-        ),
-    )
-
     col1, col2 = st.columns(2)
     
     with col1:
@@ -1942,6 +1924,16 @@ elif page == "🏥 Organgruppen Regeln":
             key="warn_2fa_select",
             label_visibility="collapsed"
         )
+
+        st.markdown("**Rotations-AAs zuerst zuteilen**")
+        st.caption("OGs, deren AAs mit entsprechender Rotation vor dem Auslastungs-Ausgleich fest zugewiesen werden (unabhängig von der OG-Auslastung, Kappung wird überschrieben). Nur für AAs.")
+        rotation_first_aa = st.multiselect(
+            "Organgruppen",
+            options=sched.OG_LIST,
+            default=sorted(og_rules.get("rotation_first_aa_ogs", [])),
+            key="rotation_first_aa_select",
+            label_visibility="collapsed"
+        )
     
     with col2:
         st.markdown("**KEIN AA Warnung**")
@@ -1962,6 +1954,24 @@ elif page == "🏥 Organgruppen Regeln":
             default=sorted(og_rules.get("warn_kein_fa_site", [])),
             key="warn_site_select",
             label_visibility="collapsed"
+        )
+
+        site_cov_mode = st.radio(
+            "Priorisierung bei Pflicht-Abdeckung beider Standorte",
+            options=[
+                "Standortabdeckung vor Vermeidungen/Rotation",
+                "Vermeidungen/Rotation vor Standortabdeckung",
+            ],
+            index=0 if og_rules.get("site_coverage_over_avoid", True) else 1,
+            key="site_coverage_mode",
+            help=(
+                "Gilt nur für OGs mit Pflicht-Abdeckung beider Standorte, wenn nur ein "
+                "Standort besetzt ist. 'Standortabdeckung vor Vermeidungen/Rotation': eine "
+                "Person vom fehlenden Standort wird auch dann gewählt, wenn sie diese OG "
+                "vermeidet. 'Vermeidungen/Rotation vor Standortabdeckung': die Vermeidungs-/"
+                "Rotations-Präferenz hat Vorrang (bisheriges Verhalten). Die Rotations-"
+                "Reihenfolge innerhalb einer Gruppe bleibt in beiden Fällen gleich."
+            ),
         )
         
         st.markdown("**Von Rapporten ausschließen**")
@@ -2017,8 +2027,9 @@ elif page == "🏥 Organgruppen Regeln":
         og_rules["og_vertretung_ogs"] = og_vertretung_ogs
         og_rules["og_vertretung_pools"] = og_vertretung_pools
         og_rules["site_coverage_over_avoid"] = (
-            site_cov_mode == "Standortabdeckung vor Avoid/Rotation"
+            site_cov_mode == "Standortabdeckung vor Vermeidungen/Rotation"
         )
+        og_rules["rotation_first_aa_ogs"] = rotation_first_aa
         save_og_rules(og_rules)
         st.success("Organgruppen-Sonderregeln gespeichert!")
         st.rerun()

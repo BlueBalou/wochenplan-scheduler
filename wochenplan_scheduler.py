@@ -87,9 +87,11 @@ def _load_og_rules():
             OG_MAX_AAS[og] = None  # No limit
     
     global US_VERTRETUNG_POOLS, OG_VERTRETUNG_OGS, OG_VERTRETUNG_POOLS
+    global ROTATION_FIRST_AA_OGS
     US_VERTRETUNG_POOLS  = _r.get("us_vertretung_pools", {})
     OG_VERTRETUNG_OGS    = _r.get("og_vertretung_ogs", [])
     OG_VERTRETUNG_POOLS  = _r.get("og_vertretung_pools", {})
+    ROTATION_FIRST_AA_OGS = _r.get("rotation_first_aa_ogs", [])
 
     return (
         set(_r.get("rotation_or_leader_only", [])),
@@ -110,16 +112,20 @@ OG_WEIGHTS_OA: Dict[str, float] = {}
 OG_WEIGHTS_AA: Dict[str, float] = {}
 OG_MAX_FAS: Dict[str, Optional[int]] = {}
 OG_MAX_AAS: Dict[str, Optional[int]] = {}
-OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OG_EXCLUDE_FROM_RAPPORTE = _load_og_rules()
-OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
-
 # US Vertretung: per-OG priority list of FAs for site-coverage substitution
 # Key: OG name, Value: list of FA names in priority order
 US_VERTRETUNG_POOLS: Dict[str, List[str]] = {}
-
 # OG Vertretung: OGs that get a bracketed substitute when fully empty
 OG_VERTRETUNG_OGS: List[str] = []
 OG_VERTRETUNG_POOLS: Dict[str, List[str]] = {}
+# OGs whose AAs with the matching rotation are seated (independent of OG load,
+# cap overruled) before the general AA load-balancing round. AAs only.
+ROTATION_FIRST_AA_OGS: List[str] = []
+# NOTE: the defaults above must stay ABOVE this call. _load_og_rules() assigns
+# all of them as module globals; declaring their defaults below the call would
+# reset them to empty after the load.
+OG_ROTATION_OR_LEADER_ONLY, OG_WARN_KEIN_AA, TARGET_OG_FOR_ONE_FA, TARGET_OG_FOR_KEIN_FA_SITE, OG_EXCLUDE_FROM_RAPPORTE = _load_og_rules()
+OGS_SKIP_KEIN_AA = set(OG_LIST) - OG_WARN_KEIN_AA
 
 
 def _load_fr_rules() -> tuple:
@@ -965,9 +971,35 @@ def _names_in_cells(ws: Worksheet, cells: Tuple[str,...]) -> List[str]:
         if isinstance(v,str) and v.strip(): out.append(v.strip())
     return out
 
+def _assigned_on_prior_days(ws: Worksheet, og: str, day: str) -> Set[str]:
+    """Names already assigned to `og` on earlier weekdays of the current plan.
+    Powers 'sticky' assignments: prefer whoever covered this OG earlier in the
+    same week so coverage stays continuous instead of reshuffling day to day."""
+    names: Set[str] = set()
+    if day not in WEEKDAYS:
+        return names
+    idx = WEEKDAYS.index(day)
+    for d in WEEKDAYS[:idx]:
+        for nm in _names_in_cells(ws, OG_CELLS.get(og, {}).get(d, [])):
+            names.add(nm)
+    return names
+
+def _sticky_choice(candidates: list, prior_names: Set[str], rng: random.Random):
+    """Among already equally-qualified `candidates`, prefer those who were
+    assigned to the same OG on a prior weekday (random among them); otherwise
+    random among all candidates. Never reorders across qualification tiers."""
+    if not candidates:
+        return None
+    sticky = [n for n in candidates if n in prior_names]
+    return rng.choice(sticky) if sticky else rng.choice(candidates)
+
 def _has_fa_from_site(ws: Worksheet, cells: Tuple[str,...], site: str) -> bool:
     for nm in _names_in_cells(ws,cells):
-        s = staff_by_name.get(nm)
+        # A US-Vertretung substitute is written as "Name (US)"; strip the suffix
+        # so it resolves to the underlying person and counts as real site
+        # coverage (suppresses the KEIN FA IN <site> flag in Round 3).
+        core = nm[:-5].strip() if nm.endswith(" (US)") else nm
+        s = staff_by_name.get(core)
         if s and s.is_fa and s.site==site: return True
     return False
 
@@ -1129,17 +1161,18 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                 tiebreak by most-filled rotation OG. Returns None if empty."""
                 if not group:
                     return None
+                prior = _assigned_on_prior_days(ws, chosen_og, day)
                 t_in    = [n for n in group if _rot_tier(n) == 0]
                 t_no    = [n for n in group if _rot_tier(n) == 1]
                 t_other = [n for n in group if _rot_tier(n) == 2]
                 if t_in:
-                    return rng.choice(t_in)
+                    return _sticky_choice(t_in, prior, rng)
                 if t_no:
-                    return rng.choice(t_no)
+                    return _sticky_choice(t_no, prior, rng)
                 if t_other:
                     max_score = max(_other_rot_score_oa(n) for n in t_other)
                     best = [n for n in t_other if _other_rot_score_oa(n) == max_score]
-                    return rng.choice(best)
+                    return _sticky_choice(best, prior, rng)
                 return None
 
             pick = None
@@ -1183,7 +1216,12 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             # placed in another (non-site-sensitive) OG. If a swap succeeds we
             # restart the loop; the same-site fallback `pick` is NOT placed and
             # stays in the pool for a future iteration.
-            if chosen_og in TARGET_OG_FOR_KEIN_FA_SITE:
+            # The swap is a site-coverage mechanism, so it only runs when site
+            # coverage outranks avoid/rotation. In the legacy mode
+            # (SITE_COVERAGE_OVER_AVOID == False) it is skipped entirely, so the
+            # OG keeps its same-site pick and any missing-site coverage is left
+            # to the manual US-Vertretung pool (Round 2.5) instead.
+            if SITE_COVERAGE_OVER_AVOID and chosen_og in TARGET_OG_FOR_KEIN_FA_SITE:
                 sites_present = {
                     staff_by_name[n].site
                     for n in staff_by_name
@@ -1280,7 +1318,47 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
             staff_by_name[name].aa_og_count = 0
         
         pool = set(present_aas)
-        
+
+        # --- Rotation-first prerun (AAs only) ---
+        # For OGs listed in rotation_first_aa_ogs, seat every PRESENT AA who has
+        # that OG in their rotations BEFORE the general load-balancing loop, so a
+        # rotation-AA is never spent as spillover in another OG first. This mirrors
+        # how LA leaders are pre-seated into the OGs they lead. The AA cap
+        # (OG_MAX_AAS) is intentionally overruled here — rotations win — but each
+        # person's total weight is still capped at 1.0, and an OG that runs out of
+        # cells stops accepting further rotation-AAs. OAs are unaffected.
+        if ROTATION_FIRST_AA_OGS:
+            prerun_ogs = [og for og in OG_PRIORITY_ORDER if og in ROTATION_FIRST_AA_OGS]
+            for og in ROTATION_FIRST_AA_OGS:
+                if og not in prerun_ogs:
+                    prerun_ogs.append(og)
+            for og in prerun_ogs:
+                cells = OG_CELLS.get(og, {}).get(day, [])
+                if not cells:
+                    continue
+                og_weight = OG_WEIGHTS_AA.get(og, 0.6)
+                # Sticky: seat AAs who covered this OG earlier in the week first,
+                # so a returning rotation-AA keeps the slot when cells are scarce.
+                prior = _assigned_on_prior_days(ws, og, day)
+                ordered = sorted(present_aas, key=lambda n: 0 if n in prior else 1)
+                for name in ordered:
+                    s = staff_by_name[name]
+                    if og not in s.rotations:
+                        continue
+                    if s.aa_og_count + og_weight > 1.0:
+                        continue
+                    if _already_listed(ws, cells, name):
+                        continue
+                    if _first_empty_cell(ws, cells) is None:
+                        break  # OG full — remaining rotation-AAs can't be seated
+                    if _place_in_og(ws, day, og, name, count_for_fa=False):
+                        s.aa_og_count += og_weight
+            # Drop anyone who can no longer fit the smallest AA weight.
+            _min_w_aa = min(OG_WEIGHTS_AA.values()) if OG_WEIGHTS_AA else 0.6
+            for name in list(pool):
+                if staff_by_name[name].aa_og_count + _min_w_aa > 1.0:
+                    pool.discard(name)
+
         while pool:
             # Same logic as OAs, but using aa_og_count and checking max_aas.
             # Cap (OG_MAX_AAS) is bypassed for an OG if at least one person in the
@@ -1342,10 +1420,11 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                               if staff_by_name[n].rotations
                               and chosen_og not in staff_by_name[n].rotations]
 
+            prior = _assigned_on_prior_days(ws, chosen_og, day)
             if in_rotation:
-                pick = rng.choice(in_rotation)
+                pick = _sticky_choice(in_rotation, prior, rng)
             elif no_rotation:
-                pick = rng.choice(no_rotation)
+                pick = _sticky_choice(no_rotation, prior, rng)
             elif other_rotation:
                 # Tiebreak: prefer candidate whose rotation OG is most filled
                 def _other_rot_score_aa(name):
@@ -1355,7 +1434,7 @@ def assign_nonleaders_to_ogs(ws: Worksheet, absences_by_day: Dict[str,Set[str]],
                     return max(AA_COUNTS[day].get(og, 0) for og in rot_ogs)
                 max_score = max(_other_rot_score_aa(n) for n in other_rotation)
                 best = [n for n in other_rotation if _other_rot_score_aa(n) == max_score]
-                pick = rng.choice(best)
+                pick = _sticky_choice(best, prior, rng)
             else:
                 break
             
