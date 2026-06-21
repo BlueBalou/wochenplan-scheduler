@@ -515,6 +515,8 @@ def _stats_fair_pick(
     rng: random.Random,
     day: str,
     stats_weight: Dict[str, float],
+    stats: Optional[dict] = None,
+    persist: bool = True,
 ) -> Optional[str]:
     """
     Cross-week fair pick for rapporte with statistik_führen=true.
@@ -538,7 +540,12 @@ def _stats_fair_pick(
     if not candidates or not kw_str:
         return None
 
-    stats = load_stats()
+    # Use the run-shared stats dict when provided (so every pick in this run sees
+    # the running counts); otherwise load from disk. In a test run the caller
+    # passes persist=False, so selection still uses the statistics but nothing is
+    # written back to stats.json.
+    if stats is None:
+        stats = load_stats()
     rapport_stats = stats.setdefault(meeting_key, {})
 
     # Cross-week ratio: assignment_count / stats_weight (lower = assign sooner).
@@ -562,11 +569,13 @@ def _stats_fair_pick(
     bucket = [n for n in pool if ratio(n) == min_ratio]
     pick = rng.choice(bucket)
 
-    # Write to stats.json immediately
+    # Update the running counts in memory so later rapporte this run see this
+    # assignment. Persist to stats.json only outside test mode.
     entry = rapport_stats.setdefault(pick, {"count": 0, "history": []})
     entry["count"] += 1
     entry["history"].append(kw_str)
-    save_stats(stats)
+    if persist:
+        save_stats(stats)
 
     # Increment in-week counters (so other rapporte this week see this assignment)
     staff_by_name[pick].meetings_count += 1
@@ -1618,6 +1627,8 @@ def assign_meeting_by_pools(
     fallback_style: Optional[str] = "red_bold",
     statistik_führen: bool = False,
     stats_weight: Optional[Dict[str, float]] = None,
+    stats: Optional[dict] = None,
+    persist_stats: bool = True,
 ):
     for a1 in cells:
         placed = False
@@ -1726,6 +1737,7 @@ def assign_meeting_by_pools(
                 pick = _stats_fair_pick(
                     meeting_key, cands, CURRENT_KW, rng, day,
                     stats_weight or {},
+                    stats=stats, persist=persist_stats,
                 )
                 # _stats_fair_pick already increments meetings_count_* counters
                 # and writes stats.json — nothing else needed here.
@@ -1753,6 +1765,13 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
     write_medizin_placeholders_monday(ws)
 
     spaet = read_spaetdienst_by_day(ws)
+
+    # One shared stats dict for the whole run. Tracked rapporte are always picked
+    # using the statistics (real and test runs alike); in a test run
+    # (skip_stats=True) the running counts are kept in memory only and never
+    # written back to stats.json.
+    run_stats = load_stats()
+    persist_stats = not skip_stats
 
     # Build per-day set of persons assigned to any OG that is excluded from rapporte.
     # Reads directly from the already-written OG cells in the sheet.
@@ -1803,8 +1822,10 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
                 rapporte_excluded_names=rapporte_excluded_by_day.get(day, set()),
                 monday_style=None,
                 fallback_text=fallback_text, fallback_style=fallback_style,
-                statistik_führen=statistik_führen and not skip_stats,
+                statistik_führen=statistik_führen,
                 stats_weight=stats_weight,
+                stats=run_stats,
+                persist_stats=persist_stats,
             )
 
 
