@@ -300,6 +300,19 @@ FEIERTAGE_MERGE_CELLS: Dict[str, str]                                  = {}
 # _filter_candidates() looks up D-1 to exclude the person from meetings the next morning.
 HINTERGRUND_BY_DAY: Dict[str, str]                                     = {}
 
+# Populated by fill_dienste_from_csv() Pass 1 from the PRIOR weekend's
+# Pikett_Vormittag_Sa/So entries, keyed by "Samstag"/"Sonntag". Used together with
+# HINTERGRUND_BY_DAY to exempt weekend workers from the Monday Friday-absence block:
+# someone who worked the weekend is current regardless of being off the Friday before.
+VORDERGRUND_BY_DAY: Dict[str, str]                                     = {}
+
+# Populated by fill_dienste_from_csv() from the Friday immediately preceding the
+# planning-week Monday (date-exact, so multiple prior Fridays in the CSV cannot be
+# confused). Holds names that were absent that Friday. assign_meetings() uses this to
+# soft-block those people from Monday rapporte flagged with
+# block_montag_wenn_freitag_vorwoche_abwesend. Empty when the CSV omits the prior Friday.
+VORWOCHE_FREITAG_ABSENT: Set[str]                                      = set()
+
 # Set by fill_dienste_from_csv() — e.g. "2026-KW21". Used by assign_meetings() to
 # record stats for rapporte with statistik_führen=true. Empty string = no CSV loaded.
 CURRENT_KW: str = ""
@@ -1540,7 +1553,9 @@ def _filter_candidates(base: List[str], *, day: str, site: str,
                        exclude_names: Optional[Set[str]] = None,
                        exclude_if_day: Optional[Dict[str, Set[str]]] = None,
                        rapporte_excluded_names: Optional[Set[str]] = None,
-                       exclude_hintergrund: bool = False) -> List[str]:
+                       exclude_hintergrund: bool = False,
+                       block_vorwoche_freitag_absent: bool = False,
+                       block_vortag_absent: bool = False) -> List[str]:
     c = [n for n in base if n not in absences.get(day, set())]
     if exclude_spaetdienst:
         c = [n for n in c if n not in spaetdienst_by_site_day.get(exclude_spaetdienst, {}).get(day, set())]
@@ -1550,6 +1565,30 @@ def _filter_candidates(base: List[str], *, day: str, site: str,
         c = [n for n in c if n not in exclude_if_day[day]]
     if rapporte_excluded_names:
         c = [n for n in c if n not in rapporte_excluded_names]
+    if block_vorwoche_freitag_absent and day == "Montag":
+        # Soft-block people who were absent the Friday of the week before. Exempt anyone
+        # who worked the preceding weekend (Sat/Sun Hintergrund OR Vordergrund): they are
+        # current regardless of the Friday absence, and excluding them would also fight
+        # the hintergrund_vortag pool. The caller turns this off entirely for the override
+        # pass, so when the block empties the pool the would-be pick is still assignable.
+        weekend_workers = {
+            HINTERGRUND_BY_DAY.get("Samstag"), HINTERGRUND_BY_DAY.get("Sonntag"),
+            VORDERGRUND_BY_DAY.get("Samstag"), VORDERGRUND_BY_DAY.get("Sonntag"),
+        } - {None}
+        blocked = VORWOCHE_FREITAG_ABSENT - weekend_workers
+        if blocked:
+            c = [n for n in c if n not in blocked]
+    if block_vortag_absent and day in WEEKDAYS and day != "Montag":
+        # Soft-block people who were absent on the immediately preceding weekday of the
+        # SAME week (Di<-Mo, Mi<-Di, Do<-Mi, Fr<-Do). Montag is deliberately excluded: that
+        # case looks back to the previous week's Friday and is handled by the separate
+        # block_vorwoche_freitag_absent flag above, which also carries the weekend-worker
+        # exemption. No exemption applies here — Nachtdienst is week-long and irrelevant.
+        # The caller turns this off for the override pass, so an emptied pool still fills.
+        prev_day = WEEKDAYS[WEEKDAYS.index(day) - 1]
+        prev_absent = absences.get(prev_day, set())
+        if prev_absent:
+            c = [n for n in c if n not in prev_absent]
     if exclude_hintergrund:
         # Look up who had Hintergrund the previous night (D-1).
         # Only exclude if the person belongs to the same site as the pool.
@@ -1629,9 +1668,17 @@ def assign_meeting_by_pools(
     stats_weight: Optional[Dict[str, float]] = None,
     stats: Optional[dict] = None,
     persist_stats: bool = True,
+    block_vorwoche_freitag_absent: bool = False,
+    block_vortag_absent: bool = False,
 ):
-    for a1 in cells:
-        placed = False
+    def _try_fill_cell(a1: str, *, block_active: bool, force_no_stats: bool,
+                       override_red: bool) -> bool:
+        """Run the pool priority loop for one cell. Returns True if a person was placed.
+        block_active is the master switch for BOTH absence soft blocks (Monday<-prior
+        Friday, and Di-Fr<-previous weekday); the override pass sets it False so an
+        emptied pool can still be filled. force_no_stats routes even tracked rapporte
+        through _fair_pick_pool (no stats.json write); override_red recolors the placed
+        name red to flag a forced, non-standard assignment."""
         for idx, pool in enumerate(pools, start=1):
             ptype = pool.get("type")
             style = pool.get("style")
@@ -1656,24 +1703,29 @@ def assign_meeting_by_pools(
                     exclude_if_day={k: set(v) for k, v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
                     rapporte_excluded_names=rapporte_excluded_names,
                     exclude_hintergrund=False,
+                    block_vorwoche_freitag_absent=block_vorwoche_freitag_absent and block_active,
+                    block_vortag_absent=block_vortag_absent and block_active,
                 )
                 if cands:
                     pick = cands[0]
                     _assign(ws, a1, pick, style)
                     if monday_style and day == "Montag":
                         if monday_style == "red": set_red(ws, a1)
+                    if override_red: set_red(ws, a1)
                     _bump_pool(meeting_key, idx, pick)
                     staff_by_name[pick].meetings_count += 1
                     staff_by_name[pick].meetings_count_week += 1
                     day_counter_name = f"meetings_count_{day.lower()}"
                     setattr(staff_by_name[pick], day_counter_name,
                             getattr(staff_by_name[pick], day_counter_name, 0) + 1)
-                    placed = True
-                    break
+                    return True
                 continue  # No eligible Spätdienst AA — fall through to next pool
             elif ptype == "hintergrund_vortag":
                 # Sunday-first priority: try each candidate individually through the
                 # full filter so all exclusions apply; use the first one that survives.
+                # The block is intentionally NOT applied here — the weekend Hintergrund
+                # person is always exempt from it anyway, and the Vortag pick must never
+                # be suppressed.
                 if day == "Montag":
                     ordered = [HINTERGRUND_BY_DAY.get("Sonntag"),
                                HINTERGRUND_BY_DAY.get("Samstag")]
@@ -1705,14 +1757,14 @@ def assign_meeting_by_pools(
                     _assign(ws, a1, pick, style)
                     if monday_style and day == "Montag":
                         if monday_style == "red": set_red(ws, a1)
+                    if override_red: set_red(ws, a1)
                     _bump_pool(meeting_key, idx, pick)
                     staff_by_name[pick].meetings_count += 1
                     staff_by_name[pick].meetings_count_week += 1
                     day_counter_name = f"meetings_count_{day.lower()}"
                     setattr(staff_by_name[pick], day_counter_name,
                             getattr(staff_by_name[pick], day_counter_name, 0) + 1)
-                    placed = True
-                    break
+                    return True
                 continue  # No eligible Hintergrund person — fall through to next pool
 
             else:
@@ -1727,13 +1779,17 @@ def assign_meeting_by_pools(
                 exclude_if_day={k:set(v) for k,v in pool.get("exclude_if_day", {}).items()} if pool.get("exclude_if_day") else None,
                 rapporte_excluded_names=rapporte_excluded_names,
                 exclude_hintergrund=pool.get("exclude_hintergrund", False),
+                block_vorwoche_freitag_absent=block_vorwoche_freitag_absent and block_active,
+                block_vortag_absent=block_vortag_absent and block_active,
             )
 
             # Pick: use cross-week stats ratio for tracked rapporte,
             # UNLESS the winning pool is hintergrund_vortag — those picks are
             # never recorded in stats (the person had no choice in being assigned).
+            # force_no_stats does the same for the override pass: a forced pick from the
+            # block-disabled re-run must not distort the cross-week statistics.
             pool_is_hintergrund = pool.get("type") == "hintergrund_vortag"
-            if statistik_führen and CURRENT_KW and not pool_is_hintergrund:
+            if statistik_führen and CURRENT_KW and not pool_is_hintergrund and not force_no_stats:
                 pick = _stats_fair_pick(
                     meeting_key, cands, CURRENT_KW, rng, day,
                     stats_weight or {},
@@ -1755,9 +1811,27 @@ def assign_meeting_by_pools(
                 _assign(ws, a1, pick, style)
                 if monday_style and day == "Montag":
                     if monday_style == "red": set_red(ws, a1)
-                placed = True
-                break
+                if override_red: set_red(ws, a1)
+                return True
 
+        return False
+
+    # Whether an absence soft block actually applies on THIS day. The Friday block only
+    # bites on Montag; the Vortag block only on Di-Fr. If neither is in effect there is
+    # nothing to override, so an empty pool means a genuine fallback, not a forced pick.
+    block_in_effect = ((block_vorwoche_freitag_absent and day == "Montag")
+                       or (block_vortag_absent and day in WEEKDAYS and day != "Montag"))
+
+    for a1 in cells:
+        # Normal pass: blocks active (if flagged for this rapport).
+        placed = _try_fill_cell(a1, block_active=True,
+                                force_no_stats=False, override_red=False)
+        # Override pass: only if a soft block emptied every pool. Re-run with the blocks
+        # off and assign the person who would have been chosen anyway, flagged red for
+        # manual review. The forced pick uses _fair_pick_pool and is not recorded in stats.
+        if not placed and block_in_effect:
+            placed = _try_fill_cell(a1, block_active=False,
+                                    force_no_stats=True, override_red=True)
         if not placed and fallback_text is not None:
             _assign(ws, a1, fallback_text, fallback_style)
 
@@ -1805,6 +1879,8 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
         fallback_style     = "red_bold" if roter_fallback else "black"
         statistik_führen   = cfg.get("statistik_führen", False)
         stats_weight       = cfg.get("stats_weight", {}) if statistik_führen else {}
+        block_vorwoche_fr  = cfg.get("block_montag_wenn_freitag_vorwoche_abwesend", False)
+        block_vortag       = cfg.get("block_wenn_vortag_abwesend", False)
 
         if statistik_führen and not CURRENT_KW:
             print(f"Warning: statistik_führen=true for '{meeting_key}' but CURRENT_KW is not set "
@@ -1826,8 +1902,198 @@ def assign_meetings(ws: Worksheet, absences: Dict[str, Set[str]], rng: random.Ra
                 stats_weight=stats_weight,
                 stats=run_stats,
                 persist_stats=persist_stats,
+                block_vorwoche_freitag_absent=block_vorwoche_fr,
+                block_vortag_absent=block_vortag,
             )
 
+
+
+# ---------------- Regelprüfung (validator) ----------------
+
+# Fill used to mark rule violations. Deliberately NOT red: red font already means
+# "forced override pick" (absence soft-block) and red_bold means fallback text, so
+# reusing red would make a violation indistinguishable from an accepted flagged pick.
+# Only D0CECE (holiday grey) is otherwise in use, so an orange fill is unambiguous.
+VIOLATION_FILL_RGB = "FFC000"
+
+# Strings the scheduler itself writes into name cells. They are not people, so the
+# validator must skip them or it would report "X is absent" for the literal text.
+# Fallback text is configurable per rapport, so those values are collected from
+# MEETING_POOLS at validation time and unioned with these fixed flags.
+FLAG_TEXTS_FIXED = {"WENIGER ALS 2FA", "KEIN FA IN BH", "KEIN FA IN LI", "KEIN AA"}
+
+
+def _cells_of_range(ws: Worksheet, a1: str):
+    """Yield individual cell objects for either a single address or an A1:B2 range."""
+    ref = ws[a1]
+    if hasattr(ref, "value"):          # single cell
+        yield ref
+        return
+    for row in ref:                    # range → tuple of tuples
+        for cell in row:
+            yield cell
+
+
+@dataclass
+class Finding:
+    day: str
+    cell: str
+    person: str
+    rule: str
+    message: str
+
+
+def validate_wochenplan(ws: Worksheet) -> List[Finding]:
+    """
+    Read a finished Wochenplan and report rule violations.
+
+    Purely read-only with respect to scheduling: it inspects the sheet as it stands,
+    so hand-edits made in Excel are checked too. Absences are re-read from the sheet
+    (ABW_RANGES + NACHT_RANGES), which means a manually corrected absence block is
+    honoured, and Nachtdienst personnel are covered by the absence check without a
+    separate rule.
+    """
+    findings: List[Finding] = []
+
+    absences = read_absences_by_day(ws)
+    spaet    = read_spaetdienst_by_day(ws)
+
+    # Fallback text is per-rapport and user-configurable, so collect the actual values
+    # in use rather than assuming "FÄLLT AUS".
+    FLAG_TEXTS = set(FLAG_TEXTS_FIXED)
+    for _k, _cfg in MEETING_POOLS.items():
+        if _k.startswith("_"):
+            continue
+        _fb = _cfg.get("fallback_text")
+        if isinstance(_fb, str) and _fb.strip():
+            FLAG_TEXTS.add(_fb.strip())
+
+    # Persons in OGs that are excluded from rapporte (same construction as assign_meetings).
+    excluded_by_day: Dict[str, Set[str]] = {d: set() for d in WEEKDAYS}
+    for og in OG_EXCLUDE_FROM_RAPPORTE:
+        if og not in OG_CELLS:
+            continue
+        for day in WEEKDAYS:
+            for a1 in OG_CELLS[og].get(day, ()):
+                v = ws[a1].value
+                if isinstance(v, str) and v.strip():
+                    excluded_by_day[day].add(v.strip())
+
+    # Which rapporte forbid Spätdienst personnel. Per the agreed rule: if ANY pool of a
+    # rapport excludes Spätdienst for a site, the whole rapport is off-limits to that
+    # site's Spätdienst staff. Rapporte containing a spaetdienst_aa pool are exempt —
+    # that type exists precisely to pick Spätdienst AAs.
+    rapport_forbids_spaet: Dict[str, Set[str]] = {}
+    rapport_forbids_laufen: Dict[str, bool] = {}
+    for meeting_key, cfg in MEETING_POOLS.items():
+        if meeting_key.startswith("_"):
+            continue
+        pools = cfg.get("pools", [])
+        if any(p.get("type") == "spaetdienst_aa" for p in pools):
+            continue
+        sites = {p.get("exclude_spaetdienst") for p in pools if p.get("exclude_spaetdienst")}
+        if sites:
+            rapport_forbids_spaet[meeting_key] = sites
+        if any(p.get("exclude_laufen") for p in pools):
+            rapport_forbids_laufen[meeting_key] = True
+
+    def _named_cells(cell_map, day):
+        """Yield (address, name) for non-empty cells, skipping known flag/fallback text."""
+        for a1 in cell_map.get(day, ()):
+            v = ws[a1].value
+            if not isinstance(v, str) or not v.strip():
+                continue
+            name = v.strip()
+            if name in FLAG_TEXTS:
+                continue
+            yield a1, name
+
+    # --- 1) Person assigned while absent (covers Nachtdienst too) --------------
+    # --- 2) Duplicate name inside one cell range ------------------------------
+    def _check_block(cell_map, day, label):
+        seen: Dict[str, str] = {}
+        for a1, name in _named_cells(cell_map, day):
+            if name in absences.get(day, set()):
+                findings.append(Finding(day, a1, name, "abwesend_zugeteilt",
+                    f"{name} ist am {day} abwesend, steht aber in {label}."))
+            if name in seen:
+                findings.append(Finding(day, a1, name, "doppelt_im_block",
+                    f"{name} steht am {day} zweimal in {label} ({seen[name]} und {a1})."))
+            else:
+                seen[name] = a1
+
+    for day in WEEKDAYS:
+        if day in FEIERTAGE:
+            continue
+        for og, day_map in OG_CELLS.items():
+            _check_block(day_map, day, f"OG {og}")
+        for site, day_map in FR_CELLS.items():
+            _check_block(day_map, day, f"FR {site}")
+        for site, mtgs in MEETING_CELLS.items():
+            for mtg, day_map in mtgs.items():
+                _check_block(day_map, day, f"Rapport {site}|{mtg}")
+
+    # --- 3) Spätdienst person in a rapport that forbids it ---------------------
+    # --- 4) Person from an rapporte-excluded OG (e.g. Laufen) in a rapport -----
+    for meeting_key, cfg in MEETING_POOLS.items():
+        if meeting_key.startswith("_"):
+            continue
+        site = cfg.get("site")
+        mtg_name = meeting_key.split("|", 1)[1] if "|" in meeting_key else meeting_key
+        day_map = MEETING_CELLS.get(site, {}).get(mtg_name, {})
+        if not day_map:
+            continue
+        forbidden_sites = rapport_forbids_spaet.get(meeting_key, set())
+        for day in WEEKDAYS:
+            if day in FEIERTAGE:
+                continue
+            for a1, name in _named_cells(day_map, day):
+                for s in forbidden_sites:
+                    if name in spaet.get(s, {}).get(day, set()):
+                        findings.append(Finding(day, a1, name, "spaetdienst_im_rapport",
+                            f"{name} hat am {day} Spätdienst ({s}) und darf nicht in "
+                            f"{meeting_key} eingeteilt werden."))
+                if name in excluded_by_day.get(day, set()):
+                    findings.append(Finding(day, a1, name, "og_ausgeschlossen_im_rapport",
+                        f"{name} ist am {day} in einer Organgruppe, die von Rapporten "
+                        f"ausgeschlossen ist, steht aber in {meeting_key}."))
+
+    # --- 5) OG warnings recomputed from current sheet state -------------------
+    for day in WEEKDAYS:
+        if day in FEIERTAGE:
+            continue
+        for og, day_map in OG_CELLS.items():
+            cells = day_map.get(day, ())
+            if not cells:
+                continue
+            names = [n for _, n in _named_cells(day_map, day)]
+            if og in OG_WARN_KEIN_AA and names and not any(
+                    staff_by_name.get(n) and staff_by_name[n].role == AA for n in names):
+                findings.append(Finding(day, cells[0], "", "kein_aa",
+                    f"OG {og} hat am {day} keinen AA."))
+            if og in TARGET_OG_FOR_ONE_FA:
+                fa = sum(1 for n in names
+                         if staff_by_name.get(n) and staff_by_name[n].role in (OA, LA))
+                if names and fa < 2:
+                    findings.append(Finding(day, cells[0], "", "weniger_als_2fa",
+                        f"OG {og} hat am {day} nur {fa} FA."))
+
+    findings.sort(key=lambda f: (WEEKDAYS.index(f.day) if f.day in WEEKDAYS else 99,
+                                 f.rule, f.cell))
+    return findings
+
+
+def mark_violations(ws: Worksheet, findings: List[Finding]) -> int:
+    """Apply the violation fill to every cell named in findings. Returns cells marked."""
+    from openpyxl.styles import PatternFill
+    fill = PatternFill(start_color=VIOLATION_FILL_RGB,
+                       end_color=VIOLATION_FILL_RGB, fill_type="solid")
+    marked = set()
+    for f in findings:
+        if f.cell and f.cell not in marked:
+            ws[f.cell].fill = fill
+            marked.add(f.cell)
+    return len(marked)
 
 
 # ---------------- XLSM post-save patch ----------------
@@ -1952,6 +2218,9 @@ def match_csv_name_to_staff(csv_name: str) -> Optional[str]:
     surname_candidates = []
     for part in surname_parts:
         if '-' in part:
+            # Keep the unsplit double name too: staff.json may store either half
+            # ("T. Slezenkovska") or the full hyphenated surname ("B. Willi-Sedlacek").
+            surname_candidates.append(part)
             surname_candidates.extend(part.split('-'))
         else:
             surname_candidates.append(part)
@@ -2046,12 +2315,20 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
     }
 
     # --- Pass 1: prior weekend only (Saturday and Sunday before Monday) ----------
-    # Populate HINTERGRUND_BY_DAY from the preceding Sat/Sun so that Monday's
-    # rapport exclusion logic (_filter_candidates exclude_hintergrund) works
-    # correctly. Nothing from these two days is written to any Excel cell.
+    # Populate HINTERGRUND_BY_DAY and VORDERGRUND_BY_DAY from the preceding Sat/Sun so
+    # that Monday's rapport logic works: exclude_hintergrund (D-1) and the Friday-absence
+    # block exemption both read these. Nothing from these days is written to any Excel cell.
+    #
+    # The CSV now also contains the prior Friday (for the Friday-absence block below). A
+    # weekday-only entry could otherwise leak into these weekday-key-able dicts (e.g. a
+    # prior-Friday Pikett_Nacht_Mo-Fr writing HINTERGRUND_BY_DAY["Freitag"]), so we guard
+    # on dayofweek >= 5 to keep these strictly to Samstag/Sonntag.
     HINTERGRUND_BY_DAY.clear()
+    VORDERGRUND_BY_DAY.clear()
     prior_weekend = df[df['Datum'] < monday_date]
     for _, row in prior_weekend.iterrows():
+        if row['Datum'].dayofweek < 5:
+            continue  # weekend only — prior weekday rows must not populate these dicts
         dienst_type = row['Bezeichnung'].strip() if isinstance(row['Bezeichnung'], str) else row['Bezeichnung']
         if any(tok in dienst_type for tok in SKIP_TYPES):
             continue
@@ -2062,6 +2339,26 @@ def fill_dienste_from_csv(ws: Worksheet, csv_path: str) -> None:
         day_name = day_names[row['Datum'].dayofweek]
         if "Pikett_24h_Sa/So" in dienst_type or "Pikett_Nacht_Mo-Fr" in dienst_type:
             HINTERGRUND_BY_DAY[day_name] = matched_name
+        elif "Pikett_Vormittag_Sa/So" in dienst_type:
+            VORDERGRUND_BY_DAY[day_name] = matched_name
+
+    # --- Prior-Friday absences (for the Monday Friday-absence block) -------------
+    # Select the Friday immediately before the planning-week Monday by EXACT date
+    # (Monday − 3 days). This is robust against a CSV that contains more than one prior
+    # Friday — only the immediately preceding one is used, so two Fridays can never be
+    # confused (mirrors the date-exact handling used elsewhere). "Absent" = any ABSENZ
+    # type, the same definition used for absences_by_day below. If the CSV omits the
+    # prior Friday, no rows match and the set stays empty (the block then never fires).
+    VORWOCHE_FREITAG_ABSENT.clear()
+    target_friday = monday_date - pd.Timedelta(days=3)
+    for _, row in df[df['Datum'] == target_friday].iterrows():
+        dienst_type = row['Bezeichnung'].strip() if isinstance(row['Bezeichnung'], str) else row['Bezeichnung']
+        if any(tok in dienst_type for tok in SKIP_TYPES):
+            continue
+        if any(tok in dienst_type for tok in ABSENZ_TYPES):
+            matched_name = match_csv_name_to_staff(row['Suchname'])
+            if matched_name:
+                VORWOCHE_FREITAG_ABSENT.add(matched_name)
 
     # --- Pass 2: current week (Monday through Sunday) — cell writes --------------
     # All normal processing: absences, Nacht, Spät, Vordergrund, Hintergrund.

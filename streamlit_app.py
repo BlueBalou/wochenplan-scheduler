@@ -488,6 +488,7 @@ page = st.sidebar.radio(
     [
         "📋 Wochenplan (Standard)",
         "📄 Wochenplan (Eigene Vorlage)", 
+        "🔍 Wochenplan prüfen",
         "👥 Personalverwaltung",
         "📊 Rapporte verwalten",
         "📊 Rapporte-Pools",
@@ -824,6 +825,77 @@ elif page == "📄 Wochenplan (Eigene Vorlage)":
         st.rerun()
 
 # ===========================================================================
+# PAGE — Wochenplan prüfen (Regelprüfung)
+# ===========================================================================
+elif page == "🔍 Wochenplan prüfen":
+    st.subheader("Wochenplan prüfen")
+    st.caption(
+        "Prüft einen fertigen Wochenplan auf Regelverstöße — auch nach manuellen "
+        "Änderungen in Excel. Abwesenheiten werden direkt aus dem Blatt gelesen, "
+        "korrigierte Einträge werden also berücksichtigt. Der Plan wird dabei nicht "
+        "verändert; die markierte Datei ist eine zusätzliche Kopie."
+    )
+
+    pruef_file = st.file_uploader(
+        "Wochenplan hochladen (.xlsm)", type=["xlsm"], key="pruef_upload"
+    )
+
+    mark_cells = st.checkbox(
+        "Betroffene Zellen orange markieren und Datei zum Download anbieten",
+        value=True,
+        key="pruef_mark",
+        help="Orange, nicht rot: Rot bedeutet im Wochenplan bereits eine erzwungene "
+             "Zuteilung (Abwesenheits-Sperre) bzw. einen Fallback-Text. Eine eigene "
+             "Farbe hält beides unterscheidbar.",
+    )
+
+    if st.button("Prüfung starten", type="primary",
+                 disabled=(pruef_file is None), key="pruef_run"):
+        with st.spinner("Prüfe Wochenplan…"):
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm") as _t:
+                    _t.write(pruef_file.getbuffer())
+                    pruef_tmp = _t.name
+
+                wb_p = load_workbook(pruef_tmp, data_only=False, keep_vba=True)
+                ws_p = wb_p["Wochenplan"]
+
+                findings = sched.validate_wochenplan(ws_p)
+
+                if not findings:
+                    st.success("✓ Keine Regelverstöße gefunden.")
+                else:
+                    st.warning(f"{len(findings)} Regelverstoß/-verstöße gefunden.")
+
+                    rows = [{
+                        "Tag": f.day,
+                        "Zelle": f.cell,
+                        "Person": f.person,
+                        "Regel": f.rule,
+                        "Beschreibung": f.message,
+                    } for f in findings]
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                                 hide_index=True)
+
+                    if mark_cells:
+                        n_marked = sched.mark_violations(ws_p, findings)
+                        out_p = pruef_tmp.replace(".xlsm", "_geprueft.xlsm")
+                        wb_p.save(out_p)
+                        # Same post-save repair the pipeline uses: openpyxl drops charts,
+                        # printer settings and VBA bits when rewriting an .xlsm.
+                        sched.patch_xlsm(out_p, pruef_tmp)
+                        with open(out_p, "rb") as fh:
+                            st.download_button(
+                                f"Markierten Wochenplan herunterladen ({n_marked} Zellen)",
+                                data=fh.read(),
+                                file_name=pruef_file.name.replace(".xlsm", "_geprueft.xlsm"),
+                                mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                                key="pruef_download",
+                            )
+            except Exception as e:
+                st.error(f"Fehler bei der Prüfung: {e}")
+
+# ===========================================================================
 # TAB 4 — Personalverwaltung
 # ===========================================================================
 elif page == "👥 Personalverwaltung":
@@ -975,6 +1047,10 @@ elif page == "📊 Rapporte verwalten":
                "Rapporte mit Statistik sollten in der Regel vor den übrigen stehen, damit ihre Zuteilung in die "
                "Wochenauslastung der späteren Rapporte einfließt.")
 
+    st.info("ℹ️ Statistik-Optionen für Rapporte (Statistik führen, Gewichtung) befinden sich unter "
+            "**Rapporte-Pools** → Statistik-Einstellungen, da dort auch die statistikrelevanten Personen "
+            "mit Gewichtung gepflegt werden.")
+
     pools_data = load_meeting_pools()
 
     # ---- Global statistics setting ----
@@ -1038,10 +1114,57 @@ elif page == "📊 Rapporte verwalten":
         r_name_current = r_parts[1] if len(r_parts) == 2 else edit_rapport_key
 
         rc1, rc2 = st.columns(2)
-        r_name_new = rc1.text_input("Name", value=r_name_current, key="edit_rapport_name")
+        r_name_new = rc1.text_input("Name", value=r_name_current,
+                                    key=f"edit_rapport_name::{edit_rapport_key}")
         r_site_new = rc2.selectbox("Standort", ["BH", "LI"],
                                    index=["BH", "LI"].index(r_site_current) if r_site_current in ["BH", "LI"] else 0,
-                                   key="edit_rapport_site")
+                                   key=f"edit_rapport_site::{edit_rapport_key}")
+
+        # Per-rapport: soft-block on Monday for people who were absent the Friday before.
+        # The widget key MUST include edit_rapport_key: a fixed key would persist the
+        # previous rapport's checkbox state across the selector switch (Streamlit session
+        # state wins over value=), making the auto-save below stamp the flag onto whatever
+        # rapport is selected next.
+        _cur_block = bool(pools_data.get(edit_rapport_key, {}).get(
+            "block_montag_wenn_freitag_vorwoche_abwesend", False))
+        block_fr_abw = st.checkbox(
+            "Wenn möglich niemanden einteilen, der in der Vorwoche am Freitag abwesend war",
+            value=_cur_block,
+            key=f"edit_rapport_block_fr::{edit_rapport_key}",
+            help="Gilt nur für Montag-Zellen dieses Rapports. Wer am Freitag der Vorwoche "
+                 "abwesend war, wird am Montag möglichst nicht zugeteilt — ausgenommen Personen, die "
+                 "das Wochenende davor Hinter- oder Vordergrund hatten (die sind aktuell). "
+                 "Weicher Block: Bleibt sonst niemand übrig (z.B. Freitag war Feiertag), wird "
+                 "die Person trotzdem zugeteilt und rot markiert, damit sie informiert oder "
+                 "manuell ersetzt werden kann. Setzt voraus, dass die CSV den Freitag der "
+                 "Vorwoche enthält.",
+        )
+        if block_fr_abw != _cur_block:
+            pools_data.setdefault(edit_rapport_key, {})["block_montag_wenn_freitag_vorwoche_abwesend"] = block_fr_abw
+            save_meeting_pools(pools_data)
+            st.rerun()
+
+        # Independent of the Montag/Freitag flag above: covers Di-Fr, looking back one
+        # weekday within the same week. Same per-rapport widget key for the same reason.
+        _cur_vortag = bool(pools_data.get(edit_rapport_key, {}).get(
+            "block_wenn_vortag_abwesend", False))
+        block_vortag_abw = st.checkbox(
+            "Wenn möglich niemanden einteilen, der am Vortag abwesend war (Di–Fr)",
+            value=_cur_vortag,
+            key=f"edit_rapport_block_vortag::{edit_rapport_key}",
+            help="Gilt für Dienstag bis Freitag: Wer am vorangehenden Arbeitstag derselben "
+                 "Woche abwesend war (Di←Mo, Mi←Di, Do←Mi, Fr←Do), wird möglichst nicht "
+                 "zugeteilt. Montag ist hier ausgenommen — dafür ist die Option darüber "
+                 "zuständig, die auf den Freitag der Vorwoche zurückgreift. Beide Optionen "
+                 "lassen sich unabhängig voneinander setzen; zusammen decken sie die ganze "
+                 "Woche ab. Weicher Block: Bleibt sonst niemand übrig, wird die Person "
+                 "trotzdem zugeteilt und rot markiert. Rot markierte Zuteilungen zählen "
+                 "nicht in die Statistik.",
+        )
+        if block_vortag_abw != _cur_vortag:
+            pools_data.setdefault(edit_rapport_key, {})["block_wenn_vortag_abwesend"] = block_vortag_abw
+            save_meeting_pools(pools_data)
+            st.rerun()
 
         if st.button("Änderungen speichern", type="primary", key="save_rapport_btn"):
             new_key = f"{r_site_new}|{r_name_new.strip()}"
@@ -1160,7 +1283,9 @@ elif page == "🔧 Layout-Editor":
             for day in ALL_WEEKDAYS:
                 row[day] = _cells_to_str(day_map.get(day, []))
             bh_rows.append(row)
-        bh_df = pd.DataFrame(bh_rows).set_index("Rapport")
+        # Explicit columns so an empty list still yields a "Rapport" column:
+        # deleting the last rapport of a site would otherwise raise KeyError here.
+        bh_df = pd.DataFrame(bh_rows, columns=["Rapport"] + ALL_WEEKDAYS).set_index("Rapport")
         bh_edited = st.data_editor(
             bh_df, key="bh_mtg_ed", use_container_width=True, column_config=_COL_CFG
         )
@@ -1173,7 +1298,9 @@ elif page == "🔧 Layout-Editor":
             for day in ALL_WEEKDAYS:
                 row[day] = _cells_to_str(day_map.get(day, []))
             li_rows.append(row)
-        li_df = pd.DataFrame(li_rows).set_index("Rapport")
+        # Explicit columns so an empty list still yields a "Rapport" column:
+        # deleting the last rapport of a site would otherwise raise KeyError here.
+        li_df = pd.DataFrame(li_rows, columns=["Rapport"] + ALL_WEEKDAYS).set_index("Rapport")
         li_edited = st.data_editor(
             li_df, key="li_mtg_ed", use_container_width=True, column_config=_COL_CFG
         )
